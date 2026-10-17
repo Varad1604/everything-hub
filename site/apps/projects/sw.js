@@ -11,8 +11,8 @@
  * stays out of it.
  */
 
-const VERSION = 'pm-shell-v2';
-const SDK = 'https://js.puter.com/';
+const VERSION = 'pm-shell-v2-nolocal2';
+const SDK = 'https://js-puter-com.invalid/';
 
 /**
  * Only the entry documents are known by name; assets are hashed. The two

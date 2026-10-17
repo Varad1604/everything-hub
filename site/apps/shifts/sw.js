@@ -4,7 +4,7 @@
  * data lives in Puter KV with a localStorage mirror; this worker only
  * handles the shell (HTML, hashed assets, icons, manifest).
  */
-const CACHE_PREFIX = 'shifts-shell-';
+const CACHE_PREFIX = 'shifts-shell--nolocal2';
 const CACHE = `${CACHE_PREFIX}v1`;
 const PRECACHE = ['./', './manifest.json', './favicon.ico', './icons/icon-192.png', './icons/icon-512.png'];
 

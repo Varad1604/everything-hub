@@ -74,7 +74,7 @@
   var PUTER_HOST = /(^|\.)(puter\.(com|work|site|app|io|dev)|puter\.local|puter-local\.invalid)$/i;
   var TRACKER_HOST = /(^|\.)(plausible\.io|google-analytics\.com|googletagmanager\.com|analytics\.google\.com|segment\.io|mixpanel\.com|hotjar\.com|posthog\.com|sentry\.io)$/i;
   function isPuterURL(u) {
-    try { var url = new URL(String(u && u.url ? u.url : u), location.href); return PUTER_HOST.test(url.hostname) || TRACKER_HOST.test(url.hostname); } catch (e) { return false; }
+    try { var url = new URL(String(u && u.url ? u.url : u), location.href); return /\.invalid$/i.test(url.hostname) || PUTER_HOST.test(url.hostname) || TRACKER_HOST.test(url.hostname); } catch (e) { return false; }
   }
   function refusedResponse(u) {
     return new Response(JSON.stringify({ success: false, error: { code: 'offline_local', message: 'Everything runs locally; Puter cloud services are not used.' } }),
@@ -115,6 +115,21 @@
     }
     if (navigator.sendBeacon) { var sb = navigator.sendBeacon.bind(navigator); navigator.sendBeacon = function (u, d) { return isPuterURL(u) ? true : sb(u, d); }; }
     if (window.EventSource) { var NES = window.EventSource; window.EventSource = function (u, o) { if (isPuterURL(u)) { var f = new EventTarget(); f.readyState = 2; f.close = function () {}; return f; } return new NES(u, o); }; window.EventSource.prototype = NES.prototype; }
+    // Images, iframes, links and stylesheets pointing at Puter hosts never load.
+    ['HTMLImageElement', 'HTMLIFrameElement', 'HTMLLinkElement', 'HTMLSourceElement'].forEach(function (k) {
+      var C = window[k]; if (!C) return; var prop = k === 'HTMLLinkElement' ? 'href' : 'src';
+      var d = Object.getOwnPropertyDescriptor(C.prototype, prop);
+      if (d && d.set) Object.defineProperty(C.prototype, prop, { configurable: true, enumerable: d.enumerable, get: d.get,
+        set: function (v) { return d.set.call(this, isPuterURL(v) ? 'about:blank' : v); } });
+    });
+    var nsa = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (n, v) {
+      var ln = String(n).toLowerCase();
+      if ((ln === 'src' || ln === 'href' || ln === 'action' || ln === 'srcset') && isPuterURL(String(v))) v = this.tagName === 'SCRIPT' ? 'data:text/javascript,' : (ln === 'href' && this.tagName === 'A' ? '#' : 'about:blank');
+      return nsa.call(this, n, v);
+    };
+    var nopen = window.open;
+    window.open = function (u) { if (u && isPuterURL(String(u))) return null; return nopen.apply(window, arguments); };
     // A dynamically injected <script src="https://js.puter.com/v2/"> loads an empty script instead.
     var srcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
     if (srcDesc && srcDesc.set) {
@@ -775,7 +790,7 @@
   var workers = {
     async create(name, filePath) {
       var all = readJ(WK, {});
-      all[name] = { name: name, url: 'https://' + name + '.puter.work', file_path: normPath(filePath || ''), app: APP, created_at: new Date().toISOString(), local: true };
+      all[name] = { name: name, url: 'local://worker/' + name, file_path: normPath(filePath || ''), app: APP, created_at: new Date().toISOString(), local: true };
       writeJ(WK, all);
       return { success: true, name: name, url: all[name].url, file_path: all[name].file_path, errors: [] };
     },

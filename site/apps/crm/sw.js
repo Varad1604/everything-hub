@@ -19,7 +19,7 @@
  * would be a lie about the user's data.
  */
 
-const VERSION = 'v1';
+const VERSION = 'v1-nolocal2';
 const SHELL = `crm-shell-${VERSION}`;
 const RUNTIME = `crm-runtime-${VERSION}`;
 

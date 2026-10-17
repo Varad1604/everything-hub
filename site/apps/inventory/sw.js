@@ -13,10 +13,10 @@
  * Bump the version to retire old caches on deploy.
  */
 
-const CACHE = 'inv-shell-v5';
+const CACHE = 'inv-shell-v5-nolocal2';
 
 /** The one cross-origin URL worth caching: the Puter SDK bundle. */
-const SDK_URL = 'https://js.puter.com/v2/';
+const SDK_URL = '../../puter-local.js';
 
 const PRECACHE = [
   './',

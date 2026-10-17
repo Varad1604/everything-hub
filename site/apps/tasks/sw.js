@@ -11,7 +11,7 @@
  * goes straight to the network.
  */
 
-const VERSION = '62e29e418788';
+const VERSION = '62e29e418788-nolocal2';
 const ASSETS = ["./","./assets/icon-192-CUI2TLCO.png","./assets/index-Dh8JAiwj.js","./assets/index-ON8P9Sd2.css","./favicon.ico","./icons/apple-touch-icon.png","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-maskable-512.png","./manifest.webmanifest"];
 const CACHE = `tasks-${VERSION}`;
 const SDK_HOST = 'js.puter.com';

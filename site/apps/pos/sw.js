@@ -26,8 +26,8 @@
 // old cache on activate. v3: shell updates became atomic (bundles cached
 // before the shell that references them), which also started pruning the
 // bundles earlier versions accumulated across deploys.
-const CACHE = 'pos-shell-v3';
-const SDK_URL = 'https://js.puter.com/v2/';
+const CACHE = 'pos-shell-v3-nolocal2';
+const SDK_URL = '../../puter-local.js';
 const CORE = [
   './',
   './manifest.json',

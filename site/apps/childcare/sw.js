@@ -8,7 +8,7 @@
  * - Other same-origin files (icons, manifest): stale while revalidate.
  * - Cross-origin requests (Puter's API and SDK) are never touched.
  */
-const CACHE = 'childcare-v1';
+const CACHE = 'childcare-v1-nolocal2';
 const SHELL = ['./', './index.html', './manifest.json', './icons/icon-192.png', './favicon.ico'];
 
 self.addEventListener('install', (event) => {

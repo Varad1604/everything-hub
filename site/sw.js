@@ -2,7 +2,7 @@
  * Shell: network-first with cache fallback (updates land, offline still works).
  * Apps & icons: stale-while-revalidate, cached lazily the first time each is opened.
  * Puter hosts: never contacted. js.puter.com is answered with the local shim. */
-const VERSION = 'everything-v1';
+const VERSION = 'everything-v1-nolocal2';
 const SHELL = `${VERSION}-shell`;
 const APPS = `${VERSION}-apps`;
 const FONTS = `${VERSION}-fonts`;

@@ -1,5 +1,5 @@
 /* Expenses service worker: app-shell caching. Puter API calls are never cached. */
-const VERSION = 'expenses-v2';
+const VERSION = 'expenses-v2-nolocal2';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png'];
@@ -18,7 +18,7 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  const isPuterSdk = url.origin === 'https://js.puter.com';
+  const isPuterSdk = url.origin === 'https://js-puter-com.invalid';
   if (!isPuterSdk && url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate') {

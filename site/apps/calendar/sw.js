@@ -29,8 +29,8 @@
  * If lazy chunks are ever introduced, either keep the previous cache alongside
  * the current one in activate, or drop skipWaiting for activate-on-next-load.
  */
-const CACHE = 'cal-shell-v2';
-const SDK_ORIGIN = 'https://js.puter.com';
+const CACHE = 'cal-shell-v2-nolocal2';
+const SDK_ORIGIN = 'https://js-puter-com.invalid';
 
 // Minimal, always-present shell. Hashed JS/CSS are cached lazily on first fetch
 // (their names change every build, so they can't be listed here). Precaching

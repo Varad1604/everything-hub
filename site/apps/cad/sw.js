@@ -7,7 +7,7 @@
  *   other own files   cached copy right away, refreshed in the background
  *   cross-origin      untouched (Puter's SDK and API)
  */
-const CACHE = 'cad-shell-v1';
+const CACHE = 'cad-shell-v1-nolocal2';
 const SHELL = ['./', './index.html', './manifest.json', './favicon.ico', './icons/icon-192.png'];
 
 self.addEventListener('install', (event) => {
