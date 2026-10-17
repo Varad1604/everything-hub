@@ -1,0 +1,526 @@
+{
+ "categories": [
+  {
+   "id": "Office",
+   "name": "Office",
+   "blurb": "Docs, sheets, slides and the rest of your desk"
+  },
+  {
+   "id": "Collaboration",
+   "name": "Collaboration",
+   "blurb": "Talk, meet, schedule and sign together"
+  },
+  {
+   "id": "Creative Tools",
+   "name": "Creative Tools",
+   "blurb": "Make pictures, films, sound and worlds"
+  },
+  {
+   "id": "Engineering",
+   "name": "Engineering",
+   "blurb": "Draw, model and build precise things"
+  },
+  {
+   "id": "Productivity",
+   "name": "Productivity",
+   "blurb": "Plan the work and keep it moving"
+  },
+  {
+   "id": "Finance",
+   "name": "Finance",
+   "blurb": "Books, bills and ownership in order"
+  },
+  {
+   "id": "Business",
+   "name": "Business",
+   "blurb": "Run the shop, the team and the customers"
+  },
+  {
+   "id": "Developer Tools",
+   "name": "Developer Tools",
+   "blurb": "Poke at APIs and see what comes back"
+  },
+  {
+   "id": "Games",
+   "name": "Games",
+   "blurb": "A quiet board for a quiet moment"
+  }
+ ],
+ "apps": [
+  {
+   "id": "spreadsheet",
+   "name": "Spreadsheet",
+   "category": "Office",
+   "alternativeTo": "Microsoft Excel, Google Sheets, Apple Numbers",
+   "aliases": [
+    "spreadsheet"
+   ]
+  },
+  {
+   "id": "documents",
+   "name": "Documents",
+   "category": "Office",
+   "alternativeTo": "Microsoft Word, Google Docs, Apple Pages",
+   "aliases": [
+    "documents"
+   ]
+  },
+  {
+   "id": "presentation",
+   "name": "Presentation",
+   "category": "Office",
+   "alternativeTo": "Microsoft PowerPoint, Google Slides, Apple Keynote",
+   "aliases": [
+    "presentation"
+   ]
+  },
+  {
+   "id": "whiteboard",
+   "name": "Whiteboard",
+   "category": "Office",
+   "alternativeTo": "Miro, Microsoft Whiteboard, FigJam",
+   "aliases": [
+    "whiteboard"
+   ]
+  },
+  {
+   "id": "pdf",
+   "name": "PDF",
+   "category": "Office",
+   "alternativeTo": "Adobe Acrobat, PDF Expert",
+   "aliases": [
+    "pdf"
+   ]
+  },
+  {
+   "id": "notes",
+   "name": "Notes",
+   "category": "Office",
+   "alternativeTo": "Microsoft OneNote, Evernote, Apple Notes",
+   "aliases": [
+    "notes"
+   ]
+  },
+  {
+   "id": "records",
+   "name": "Records",
+   "category": "Office",
+   "alternativeTo": "Airtable, Microsoft Access, Baserow",
+   "aliases": [
+    "records"
+   ]
+  },
+  {
+   "id": "meetings",
+   "name": "Meetings",
+   "category": "Collaboration",
+   "alternativeTo": "Zoom, Google Meet, Microsoft Teams",
+   "aliases": [
+    "meetings"
+   ]
+  },
+  {
+   "id": "teamchat",
+   "name": "Teamchat",
+   "category": "Collaboration",
+   "alternativeTo": "Slack, Microsoft Teams, Google Chat",
+   "aliases": [
+    "teamchat"
+   ]
+  },
+  {
+   "id": "email",
+   "name": "Email",
+   "category": "Collaboration",
+   "alternativeTo": "Gmail, Microsoft Outlook, Apple Mail",
+   "aliases": [
+    "email"
+   ]
+  },
+  {
+   "id": "contacts",
+   "name": "Contacts",
+   "category": "Collaboration",
+   "alternativeTo": "Google Contacts, Apple Contacts",
+   "aliases": [
+    "contacts"
+   ]
+  },
+  {
+   "id": "calendar",
+   "name": "Calendar",
+   "category": "Collaboration",
+   "alternativeTo": "Google Calendar, Apple Calendar, Outlook Calendar",
+   "aliases": [
+    "calendar"
+   ]
+  },
+  {
+   "id": "signatures",
+   "name": "Signatures",
+   "category": "Collaboration",
+   "alternativeTo": "DocuSign, Adobe Acrobat Sign, Dropbox Sign",
+   "aliases": [
+    "sign",
+    "signatures"
+   ]
+  },
+  {
+   "id": "photo-studio",
+   "name": "Photo Studio",
+   "category": "Creative Tools",
+   "alternativeTo": "Adobe Photoshop, Pixelmator",
+   "aliases": [
+    "photo-studio",
+    "ps"
+   ]
+  },
+  {
+   "id": "video-studio",
+   "name": "Video Studio",
+   "category": "Creative Tools",
+   "alternativeTo": "CapCut, Adobe Premiere Pro, Final Cut Pro, DaVinci Resolve",
+   "aliases": [
+    "video-studio",
+    "vs"
+   ]
+  },
+  {
+   "id": "vector-studio",
+   "name": "Vector Studio",
+   "category": "Creative Tools",
+   "alternativeTo": "Adobe Illustrator, CorelDRAW, Affinity Designer",
+   "aliases": [
+    "vector-studio",
+    "ves"
+   ]
+  },
+  {
+   "id": "audio-studio",
+   "name": "Audio Studio",
+   "category": "Creative Tools",
+   "alternativeTo": "Adobe Audition, Sound Forge",
+   "aliases": [
+    "as",
+    "audio-studio"
+   ]
+  },
+  {
+   "id": "music-studio",
+   "name": "Music Studio",
+   "category": "Creative Tools",
+   "alternativeTo": "FL Studio, Ableton Live, Logic Pro",
+   "aliases": [
+    "ms",
+    "music-studio"
+   ]
+  },
+  {
+   "id": "3d",
+   "name": "3D Studio",
+   "category": "Creative Tools",
+   "alternativeTo": "Autodesk Maya, SketchUp",
+   "aliases": [
+    "3d",
+    "3d-studio"
+   ]
+  },
+  {
+   "id": "cad",
+   "name": "CAD",
+   "category": "Engineering",
+   "alternativeTo": "AutoCAD, DraftSight, BricsCAD",
+   "aliases": [
+    "cad"
+   ]
+  },
+  {
+   "id": "parametric",
+   "name": "Parametric",
+   "category": "Engineering",
+   "alternativeTo": "SolidWorks, Autodesk Fusion, Autodesk Inventor",
+   "aliases": [
+    "parametric"
+   ]
+  },
+  {
+   "id": "circuits",
+   "name": "Circuits",
+   "category": "Engineering",
+   "alternativeTo": "Altium Designer, Autodesk Eagle, OrCAD",
+   "aliases": [
+    "circuits"
+   ]
+  },
+  {
+   "id": "building-design",
+   "name": "Building Design",
+   "category": "Engineering",
+   "alternativeTo": "Autodesk Revit, ArchiCAD, Vectorworks",
+   "aliases": [
+    "bd",
+    "building-design"
+   ]
+  },
+  {
+   "id": "tasks",
+   "name": "Tasks",
+   "category": "Productivity",
+   "alternativeTo": "Todoist, Microsoft To Do, TickTick",
+   "aliases": [
+    "tasks"
+   ]
+  },
+  {
+   "id": "projects",
+   "name": "Projects",
+   "category": "Productivity",
+   "alternativeTo": "Trello, Asana, monday.com",
+   "aliases": [
+    "projects"
+   ]
+  },
+  {
+   "id": "wiki",
+   "name": "Wiki",
+   "category": "Productivity",
+   "alternativeTo": "Notion, Confluence, Coda",
+   "aliases": [
+    "wiki"
+   ]
+  },
+  {
+   "id": "time-tracking",
+   "name": "Time Tracking",
+   "category": "Productivity",
+   "alternativeTo": "Toggl Track, Harvest, Clockify",
+   "aliases": [
+    "time-tracking",
+    "tt"
+   ]
+  },
+  {
+   "id": "survey",
+   "name": "Surveys",
+   "category": "Productivity",
+   "alternativeTo": "SurveyMonkey, Google Forms, Typeform",
+   "aliases": [
+    "survey",
+    "surveys"
+   ]
+  },
+  {
+   "id": "accounting",
+   "name": "Accounting",
+   "category": "Finance",
+   "alternativeTo": "QuickBooks Online, Xero, Wave Accounting",
+   "aliases": [
+    "accounting"
+   ]
+  },
+  {
+   "id": "invoicing",
+   "name": "Invoicing",
+   "category": "Finance",
+   "alternativeTo": "FreshBooks, Zoho Invoice, Wave Invoicing",
+   "aliases": [
+    "invoicing"
+   ]
+  },
+  {
+   "id": "expense",
+   "name": "Expenses",
+   "category": "Finance",
+   "alternativeTo": "Expensify, SAP Concur, Zoho Expense",
+   "aliases": [
+    "expense",
+    "expenses"
+   ]
+  },
+  {
+   "id": "cap-table",
+   "name": "Cap Table",
+   "category": "Finance",
+   "alternativeTo": "Carta, Pulley",
+   "aliases": [
+    "cap-table",
+    "captable"
+   ]
+  },
+  {
+   "id": "crm",
+   "name": "CRM",
+   "category": "Business",
+   "alternativeTo": "Salesforce, HubSpot CRM, Pipedrive",
+   "aliases": [
+    "crm"
+   ]
+  },
+  {
+   "id": "help-desk",
+   "name": "Help Desk",
+   "category": "Business",
+   "alternativeTo": "Zendesk, Freshdesk, Intercom, Help Scout",
+   "aliases": [
+    "help",
+    "help-desk"
+   ]
+  },
+  {
+   "id": "contracts",
+   "name": "Contracts",
+   "category": "Business",
+   "alternativeTo": "ContractSafe, Juro",
+   "aliases": [
+    "contracts"
+   ]
+  },
+  {
+   "id": "pos",
+   "name": "Point of Sale",
+   "category": "Business",
+   "alternativeTo": "Square POS, Shopify POS, Lightspeed",
+   "aliases": [
+    "point-of-sale",
+    "pos"
+   ]
+  },
+  {
+   "id": "inventory",
+   "name": "Inventory",
+   "category": "Business",
+   "alternativeTo": "Zoho Inventory, Sortly, inFlow Inventory",
+   "aliases": [
+    "inventory"
+   ]
+  },
+  {
+   "id": "assets",
+   "name": "Assets",
+   "category": "Business",
+   "alternativeTo": "Asset Panda, EZOfficeInventory",
+   "aliases": [
+    "assets"
+   ]
+  },
+  {
+   "id": "hiring",
+   "name": "Hiring",
+   "category": "Business",
+   "alternativeTo": "Greenhouse, Lever, Workable",
+   "aliases": [
+    "hiring"
+   ]
+  },
+  {
+   "id": "shifts",
+   "name": "Shifts",
+   "category": "Business",
+   "alternativeTo": "Deputy, When I Work, Homebase",
+   "aliases": [
+    "shifts"
+   ]
+  },
+  {
+   "id": "childcare",
+   "name": "Childcare",
+   "category": "Business",
+   "alternativeTo": "brightwheel, Procare, HiMama",
+   "aliases": [
+    "childcare"
+   ]
+  },
+  {
+   "id": "field-service",
+   "name": "Field Service",
+   "category": "Business",
+   "alternativeTo": "Jobber, Housecall Pro, ServiceTitan",
+   "aliases": [
+    "field-service",
+    "fieldservice"
+   ]
+  },
+  {
+   "id": "legal",
+   "name": "Legal",
+   "category": "Business",
+   "alternativeTo": "Clio, MyCase, PracticePanther",
+   "aliases": [
+    "legal"
+   ]
+  },
+  {
+   "id": "fleet",
+   "name": "Fleet",
+   "category": "Business",
+   "alternativeTo": "Fleetio, Samsara Fleet Maintenance, Whip Around",
+   "aliases": [
+    "fleet"
+   ]
+  },
+  {
+   "id": "property-management",
+   "name": "Property Management",
+   "category": "Business",
+   "alternativeTo": "Buildium, AppFolio, Rent Manager",
+   "aliases": [
+    "property-management"
+   ]
+  },
+  {
+   "id": "api-client",
+   "name": "API Client",
+   "category": "Developer Tools",
+   "alternativeTo": "Postman, Insomnia, Hoppscotch",
+   "aliases": [
+    "api-client",
+    "apic"
+   ]
+  },
+  {
+   "id": "chess",
+   "name": "Chess",
+   "category": "Games",
+   "description": "Play against the computer or a friend, with clocks and online play.",
+   "aliases": [
+    "chess"
+   ]
+  },
+  {
+   "id": "backgammon",
+   "name": "Backgammon",
+   "category": "Games",
+   "description": "Play against the computer or a friend, locally or online.",
+   "aliases": [
+    "backgammon"
+   ]
+  },
+  {
+   "id": "checkers",
+   "name": "Checkers",
+   "category": "Games",
+   "description": "American checkers against the computer or a friend.",
+   "aliases": [
+    "checkers"
+   ]
+  },
+  {
+   "id": "solitaire",
+   "name": "Solitaire",
+   "category": "Games",
+   "description": "Klondike (draw one or three, optional Vegas scoring) and Spider solitaire, with optional cloud saves.",
+   "aliases": [
+    "solitaire"
+   ]
+  },
+  {
+   "id": "sudoku",
+   "name": "Sudoku",
+   "category": "Games",
+   "description": "Four difficulty levels, daily puzzles, and hints that explain the logic.",
+   "aliases": [
+    "sudoku"
+   ]
+  }
+ ]
+}

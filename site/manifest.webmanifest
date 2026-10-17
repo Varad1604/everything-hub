@@ -1,0 +1,22 @@
+{
+  "name": "Everything",
+  "short_name": "Everything",
+  "description": "Fifty-one open-source apps, running entirely in your browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "background_color": "#f4efe7",
+  "theme_color": "#f4efe7",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "shortcuts": [
+    { "name": "Documents", "url": "./#/app/documents", "icons": [{ "src": "icons/documents.png", "sizes": "128x128" }] },
+    { "name": "Spreadsheet", "url": "./#/app/spreadsheet", "icons": [{ "src": "icons/spreadsheet.png", "sizes": "128x128" }] },
+    { "name": "Notes", "url": "./#/app/notes", "icons": [{ "src": "icons/notes.png", "sizes": "128x128" }] }
+  ]
+}
