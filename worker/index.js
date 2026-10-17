@@ -32,6 +32,7 @@ async function api(request, env, url) {
   }
   if (p.startsWith('/api/ai/')) {
     if (!env.AI) return json({ error: { message: 'AI is not enabled on this server.' } }, 503);
+    if (!identityFromHeaders(request.headers)) return json({ error: { message: 'Open this from an Everything Hub app.' } }, 401);
     const tail = p.slice('/api/ai'.length);
     if (tail === '/chat/completions' && request.method === 'POST') return aiChatCompletions(env, await request.json());
     if (tail === '/images/generations' && request.method === 'POST') return aiImages(env, await request.json());
