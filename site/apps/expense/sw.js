@@ -1,4 +1,4 @@
-/* Expenses service worker: app-shell caching. Puter API calls are never cached. */
+/* Expenses service worker: app-shell caching. Everything Hub API calls are never cached. */
 const VERSION = 'expenses-v2-nolocal2';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
@@ -18,8 +18,8 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  const isPuterSdk = url.origin === 'https://js-puter-com.invalid';
-  if (!isPuterSdk && url.origin !== self.location.origin) return;
+  const isEhubSdk = url.origin === 'https://sdk.everything-hub.invalid/';
+  if (!isEhubSdk && url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate') {
     event.respondWith(

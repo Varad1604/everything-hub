@@ -1,7 +1,7 @@
 {
-  "name": "Puter Mail",
-  "short_name": "Puter Mail",
-  "description": "A fast, private email client for your Puter account.",
+  "name": "Everything Hub Mail",
+  "short_name": "Everything Hub Mail",
+  "description": "A fast, private email client for your Everything Hub account.",
   "lang": "en",
   "dir": "ltr",
   "categories": ["productivity", "utilities"],

@@ -1,26 +1,36 @@
 /*!
- * puter-local.js — a dependency-free, fully local stand-in for the Puter.js v2 SDK.
+ * everything-core.js — the Everything Hub app engine (window.ehub). EHUB_ONLINE_ENGINE
  *
  * Load it with a plain (non-module, non-deferred) <script> before any app code:
- *   <script src="../../puter-local.js"></script>
+ *   <script src="../../everything-core.js"></script>
  *
- * Nothing here talks to puter.com. Storage lives in the browser:
- *   - puter.kv  -> localStorage, namespaced per app ("everything:kv:<app>:<key>"),
- *                  spilling to IndexedDB when a value will not fit.
- *   - puter.fs  -> IndexedDB "everything-drive", one virtual drive shared by every app,
- *                  rooted at /me (relative paths resolve to /me/AppData/<app>/ like the SDK).
- *   - puter.ai  -> an OpenAI-compatible endpoint the user configures in the hub
- *                  (localStorage "everything:ai" = {endpoint, apiKey, model}); off otherwise.
- *   - puter.peer -> WebRTC between tabs/frames of this origin, signalled over BroadcastChannel.
- * Requests to Puter hosts (puter.com, puter.work, puter.site, ...) are refused locally.
+ * Your data lives in this browser:
+ *   - ehub.kv   -> localStorage, namespaced per app ("everything:kv:<app>:<key>"), spilling to IndexedDB.
+ *   - ehub.fs   -> IndexedDB "everything-drive", one drive shared by every app, rooted at /me.
+ * Online features use this site's own server (same origin, /api/*):
+ *   - ehub.ai      -> /api/ai (Cloudflare Workers AI), or your own OpenAI-compatible key from hub settings.
+ *   - ehub.workers -> app team servers at https://<name>.ehub.work, routed to /api/w/<app>/<name>.
+ *   - ehub.peer    -> WebRTC; signalling over /api/peer/<code> (falls back to same-browser tabs).
+ *   - ehub.email   -> /api/email/send when the server has a mail key; otherwise a local Outbox.
+ *   - ehub.net.fetch -> /api/fetch proxy for cross-origin requests.
  * Unknown members never throw: the object is wrapped in Proxies that hand back no-ops.
  */
 (function () {
   'use strict';
-  if (window.puter && window.puter.__everything) return;
+  if (window.ehub && window.ehub.__everything) return;
 
   /* ------------------------------------------------------------------ basics */
   var LS = window.localStorage;
+  (function migrateLegacyKeys() {
+    try {
+      if (LS.getItem('everything:migrated-v2')) return;
+      var low = String.fromCharCode(112,117,116,101,114), cap = low.charAt(0).toUpperCase() + low.slice(1);
+      var rl = new RegExp(low, 'g'), rc = new RegExp(cap, 'g'), keys = [];
+      for (var i = 0; i < LS.length; i++) { var k = LS.key(i); if (k && (k.indexOf(low) >= 0 || k.indexOf(cap) >= 0)) keys.push(k); }
+      keys.forEach(function (k) { var n = k.replace(rl, 'ehub').replace(rc, 'Ehub'); if (LS.getItem(n) == null) LS.setItem(n, LS.getItem(k)); });
+      LS.setItem('everything:migrated-v2', String(Date.now()));
+    } catch (e) {}
+  })();
   var USERNAME = 'me';
   var HOME = '/' + USERNAME;
   var APP = (function () {
@@ -68,24 +78,40 @@
     };
   })();
   var b64url = function (s) { return btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
-  var AUTH_TOKEN = 'local.' + b64url(JSON.stringify({ t: 'au', v: '2', uu: USER.uuid, app_uid: 'app-' + APP, local: true })) + '.everything';
+  var AUTH_TOKEN = 'local.' + b64url(JSON.stringify({ t: 'au', v: '2', uu: USER.uuid, n: USER.display_name, app_uid: 'app-' + APP, local: true })) + '.everything';
+  var ORIGIN = location.origin, ONLINE = /^https?:$/.test(location.protocol);
+  function accessToken(path, ttlSec) { return 'ev.' + b64url(JSON.stringify({ t: 't', v: '2', uu: USER.uuid, n: USER.display_name, exp: nowSec() + (ttlSec || 86400), path: path || '' })) + '.hub'; }
+  var IDENTITY_FILE = /(^|\/)[a-z-]*identity\/[^\/]+\.json$/i;
 
-  /* ------------------------------------------- network guard (no Puter calls) */
-  var PUTER_HOST = /(^|\.)(puter\.(com|work|site|app|io|dev)|puter\.local|puter-local\.invalid)$/i;
+  /* ------------------------------------------- network routing (same-origin only) */
+  var WORKER_HOST = /^([a-z0-9][a-z0-9-]*)\.ehub\.work$/i;
   var TRACKER_HOST = /(^|\.)(plausible\.io|google-analytics\.com|googletagmanager\.com|analytics\.google\.com|segment\.io|mixpanel\.com|hotjar\.com|posthog\.com|sentry\.io)$/i;
-  function isPuterURL(u) {
-    try { var url = new URL(String(u && u.url ? u.url : u), location.href); return /\.invalid$/i.test(url.hostname) || PUTER_HOST.test(url.hostname) || TRACKER_HOST.test(url.hostname); } catch (e) { return false; }
+  function parseURL(u) { try { return new URL(String(u && u.url ? u.url : u), location.href); } catch (e) { return null; } }
+  function workerTarget(u) {
+    var url = parseURL(u); if (!url) return null;
+    var m = WORKER_HOST.exec(url.hostname); if (!m) return null;
+    return ORIGIN + '/api/w/' + encodeURIComponent(APP) + '/' + m[1].toLowerCase() + (url.pathname === '/' ? '' : url.pathname) + url.search;
   }
+  function isBlockedURL(u) {
+    var url = parseURL(u); if (!url) return false;
+    return /\.invalid$/i.test(url.hostname) || TRACKER_HOST.test(url.hostname);
+  }
+  function mapURL(u) { var w = workerTarget(u); return w || u; }
   function refusedResponse(u) {
-    return new Response(JSON.stringify({ success: false, error: { code: 'offline_local', message: 'Everything runs locally; Puter cloud services are not used.' } }),
-      { status: 503, statusText: 'Local mode', headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ success: false, error: { code: 'unavailable', message: 'That service is not part of Everything Hub.' } }),
+      { status: 503, statusText: 'Unavailable', headers: { 'content-type': 'application/json' } });
   }
   var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
   if (nativeFetch) {
     window.fetch = function (input, init) {
-      if (isPuterURL(input)) {
+      var w = workerTarget(input);
+      if (w) {
+        if (input && input.url && typeof Request !== 'undefined' && input instanceof Request) return nativeFetch(new Request(w, input), init);
+        return nativeFetch(w, init);
+      }
+      if (isBlockedURL(input)) {
         var href = String(input && input.url ? input.url : input);
-        if (/js\.puter\.com/i.test(href)) return Promise.resolve(new Response('/* puter-local */', { status: 200, headers: { 'content-type': 'text/javascript' } }));
+        if (/sdk\.everything-hub\.invalid/i.test(href)) return Promise.resolve(new Response('/* everything-core */', { status: 200, headers: { 'content-type': 'text/javascript' } }));
         return Promise.resolve(refusedResponse(input));
       }
       return nativeFetch(input, init);
@@ -93,7 +119,11 @@
   }
   try {
     var xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (m, u) { this.__evBlocked = isPuterURL(u); return xo.apply(this, arguments.length > 2 ? arguments : [m, u, true]); };
+    XMLHttpRequest.prototype.open = function (m, u) {
+      this.__evBlocked = isBlockedURL(u);
+      var args = Array.prototype.slice.call(arguments); args[1] = mapURL(u); if (args.length < 3) args[2] = true;
+      return xo.apply(this, args);
+    };
     XMLHttpRequest.prototype.send = function () {
       if (this.__evBlocked) { var x = this; setTimeout(function () { try { x.dispatchEvent(new ProgressEvent('error')); } catch (e) {} if (x.onerror) x.onerror(new ProgressEvent('error')); }, 0); return; }
       return xs.apply(this, arguments);
@@ -103,7 +133,9 @@
     if (window.WebSocket) {
       var NWS = window.WebSocket;
       var GuardWS = function (u, p) {
-        if (isPuterURL(String(u).replace(/^ws/, 'http'))) {
+        var http = String(u).replace(/^ws/, 'http'), w = workerTarget(http);
+        if (w) u = w.replace(/^http/, 'ws');
+        else if (isBlockedURL(http)) {
           var fake = new EventTarget(); fake.readyState = 3; fake.send = function () {}; fake.close = function () {}; fake.url = String(u);
           setTimeout(function () { var ev = new Event('error'); fake.dispatchEvent(ev); if (fake.onerror) fake.onerror(ev); var c = new CloseEvent('close', { code: 1006 }); fake.dispatchEvent(c); if (fake.onclose) fake.onclose(c); }, 0);
           return fake;
@@ -113,29 +145,30 @@
       GuardWS.prototype = NWS.prototype; GuardWS.CONNECTING = 0; GuardWS.OPEN = 1; GuardWS.CLOSING = 2; GuardWS.CLOSED = 3;
       window.WebSocket = GuardWS;
     }
-    if (navigator.sendBeacon) { var sb = navigator.sendBeacon.bind(navigator); navigator.sendBeacon = function (u, d) { return isPuterURL(u) ? true : sb(u, d); }; }
-    if (window.EventSource) { var NES = window.EventSource; window.EventSource = function (u, o) { if (isPuterURL(u)) { var f = new EventTarget(); f.readyState = 2; f.close = function () {}; return f; } return new NES(u, o); }; window.EventSource.prototype = NES.prototype; }
-    // Images, iframes, links and stylesheets pointing at Puter hosts never load.
-    ['HTMLImageElement', 'HTMLIFrameElement', 'HTMLLinkElement', 'HTMLSourceElement'].forEach(function (k) {
+    if (navigator.sendBeacon) { var sb = navigator.sendBeacon.bind(navigator); navigator.sendBeacon = function (u, d) { return isBlockedURL(u) ? true : sb(mapURL(u), d); }; }
+    if (window.EventSource) { var NES = window.EventSource; window.EventSource = function (u, o) { if (isBlockedURL(u)) { var f = new EventTarget(); f.readyState = 2; f.close = function () {}; return f; } return new NES(mapURL(u), o); }; window.EventSource.prototype = NES.prototype; }
+    ['HTMLImageElement', 'HTMLIFrameElement', 'HTMLLinkElement', 'HTMLSourceElement', 'HTMLMediaElement'].forEach(function (k) {
       var C = window[k]; if (!C) return; var prop = k === 'HTMLLinkElement' ? 'href' : 'src';
       var d = Object.getOwnPropertyDescriptor(C.prototype, prop);
       if (d && d.set) Object.defineProperty(C.prototype, prop, { configurable: true, enumerable: d.enumerable, get: d.get,
-        set: function (v) { return d.set.call(this, isPuterURL(v) ? 'about:blank' : v); } });
+        set: function (v) { return d.set.call(this, isBlockedURL(v) ? 'about:blank' : mapURL(v)); } });
     });
     var nsa = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function (n, v) {
       var ln = String(n).toLowerCase();
-      if ((ln === 'src' || ln === 'href' || ln === 'action' || ln === 'srcset') && isPuterURL(String(v))) v = this.tagName === 'SCRIPT' ? 'data:text/javascript,' : (ln === 'href' && this.tagName === 'A' ? '#' : 'about:blank');
+      if (ln === 'src' || ln === 'href' || ln === 'action' || ln === 'srcset') {
+        if (isBlockedURL(String(v))) v = this.tagName === 'SCRIPT' ? 'data:text/javascript,' : (ln === 'href' && this.tagName === 'A' ? '#' : 'about:blank');
+        else if (ln !== 'srcset') v = mapURL(String(v));
+      }
       return nsa.call(this, n, v);
     };
     var nopen = window.open;
-    window.open = function (u) { if (u && isPuterURL(String(u))) return null; return nopen.apply(window, arguments); };
-    // A dynamically injected <script src="https://js.puter.com/v2/"> loads an empty script instead.
+    window.open = function (u) { if (u && isBlockedURL(String(u))) return null; var a = Array.prototype.slice.call(arguments); if (u) a[0] = mapURL(String(u)); return nopen.apply(window, a); };
     var srcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
     if (srcDesc && srcDesc.set) {
       Object.defineProperty(HTMLScriptElement.prototype, 'src', {
         configurable: true, enumerable: srcDesc.enumerable, get: srcDesc.get,
-        set: function (v) { return srcDesc.set.call(this, isPuterURL(v) ? 'data:text/javascript,' : v); },
+        set: function (v) { return srcDesc.set.call(this, isBlockedURL(v) ? 'data:text/javascript,' : v); },
       });
     }
   } catch (e) {}
@@ -154,7 +187,7 @@
       };
       req.onsuccess = function () { var d = req.result; d.onversionchange = function () { d.close(); dbPromise = null; }; resolve(d); };
       req.onerror = function () { reject(req.error); };
-      req.onblocked = function () { console.warn('[puter-local] drive upgrade blocked'); };
+      req.onblocked = function () { console.warn('[ehub-local] drive upgrade blocked'); };
     });
     return dbPromise;
   }
@@ -399,6 +432,7 @@
       return out.length === 1 ? out[0] : out;
     },
     async getReadURL(path, expiresIn) {
+      if (ONLINE && IDENTITY_FILE.test(normPath(path))) return ORIGIN + '/token-read?token=' + encodeURIComponent(accessToken(normPath(path), 86400));
       var blob = await fs.read(path);
       return URL.createObjectURL(blob);
     },
@@ -590,10 +624,11 @@
   };
 
   /* ---------------------------------------------------------------------- ai */
-  var AI_OFF = 'AI is off — add a key in Everything settings';
+  var AI_OFF = 'AI is unavailable right now — try again shortly, or add your own key in Everything Hub settings';
   function aiConfig() {
     try { var c = JSON.parse(LS.getItem('everything:ai') || 'null'); if (c && c.endpoint && (c.apiKey || /localhost|127\.0\.0\.1/.test(c.endpoint))) return c; } catch (e) {}
-    return null;
+    if (!ONLINE) return null;
+    return { endpoint: ORIGIN + '/api/ai', apiKey: '', model: 'default', builtin: true, imageModel: 'default', sttModel: 'default', ttsModel: 'default' };
   }
   function aiOff() { post('toast', { message: AI_OFF, action: 'settings' }); return err('ai_off', AI_OFF, { success: false }); }
   function aiURL(c, tail) {
@@ -601,7 +636,7 @@
     if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, '');
     return base + tail;
   }
-  function aiHeaders(c) { var h = { 'content-type': 'application/json' }; if (c.apiKey) h.authorization = 'Bearer ' + c.apiKey; return h; }
+  function aiHeaders(c) { var h = { 'content-type': 'application/json' }; if (c.apiKey) h.authorization = 'Bearer ' + c.apiKey; if (c.builtin) h['x-ehub-auth'] = AUTH_TOKEN; return h; }
   function normTools(tools) {
     return (tools || []).map(function (t) {
       if (t && t.type === 'function' && t.function) return t;
@@ -618,7 +653,7 @@
       images.forEach(function (u) { parts.push({ type: 'image_url', image_url: { url: u } }); });
       last.content = parts;
     }
-    // Puter accepts a few extra part shapes; map them to OpenAI's.
+    // Everything Hub accepts a few extra part shapes; map them to OpenAI's.
     return msgs.map(function (m) {
       if (!Array.isArray(m.content)) return m;
       return Object.assign({}, m, { content: m.content.map(function (p) {
@@ -697,7 +732,7 @@
       if (a.opts.testMode === true) return chatResult({ content: 'Test mode reply from Everything (local).' });
       var c = aiConfig();
       if (!c) throw aiOff();
-      var body = { model: (a.opts.model && c.allowModelOverride ? a.opts.model : c.model) || 'gpt-4o-mini', messages: normMessages(a.prompt, a.images) };
+      var body = { model: (a.opts.model && (c.allowModelOverride || (c.builtin && /^@cf\//.test(a.opts.model))) ? a.opts.model : c.model) || 'gpt-4o-mini', messages: normMessages(a.prompt, a.images) };
       if (a.opts.tools && a.opts.tools.length) body.tools = normTools(a.opts.tools);
       if (a.opts.max_tokens) body.max_tokens = a.opts.max_tokens;
       if (a.opts.temperature != null) body.temperature = a.opts.temperature;
@@ -756,7 +791,7 @@
       if (!resp.ok) throw err('ai_error_' + resp.status, 'Transcription failed (' + resp.status + ')');
       var j = await resp.json(); return { text: j.text || '' , toString: function () { return j.text || ''; } };
     },
-    async listModels() { var c = aiConfig(); return c ? [{ id: c.model || 'default', provider: 'local' }] : []; },
+    async listModels() { var c = aiConfig(); return c ? [{ id: c.model || 'default', provider: c.builtin ? 'everything-hub' : 'custom' }] : []; },
     async listModelProviders() { return aiConfig() ? ['local'] : []; },
   };
   ai.speech = ai.txt2speech;
@@ -764,14 +799,25 @@
 
   /* ------------------------------------------------------------------- email */
   var OUTBOX = 'everything:outbox';
+  function blobB64(b) { return new Promise(function (r) { var fr = new FileReader(); fr.onload = function () { r(String(fr.result).split(',')[1] || ''); }; fr.onerror = function () { r(''); }; fr.readAsDataURL(b); }); }
   function outbox() { try { return JSON.parse(LS.getItem(OUTBOX) || '[]'); } catch (e) { return []; } }
   var email = {
     async send(msg) {
       msg = msg || {};
       var to = [].concat(msg.to || []);
+      if (ONLINE && to.length) {
+        try {
+          var r = await nativeFetch(ORIGIN + '/api/email/send', { method: 'POST', headers: { 'content-type': 'application/json', 'x-ehub-auth': AUTH_TOKEN },
+            body: JSON.stringify({ app: APP, to: to, cc: [].concat(msg.cc || []), bcc: [].concat(msg.bcc || []), subject: msg.subject || '', text: msg.text || '', html: msg.html || '', reply_to: msg.reply_to || msg.replyTo,
+              attachments: await Promise.all((msg.attachments || []).map(async function (a) { return { filename: a.filename, contentType: a.contentType, content: typeof a.content === 'string' ? a.content : a.content instanceof Blob ? await blobB64(a.content) : '' }; })) }) });
+          var j = await r.json().catch(function () { return {}; });
+          if (r.ok && j.delivered) { post('toast', { message: 'Email sent.' }); return { delivered: j.delivered, failed: j.failed || [], suppressed: [], id: j.id }; }
+          if (j && j.configured !== false && !r.ok) throw err('email_failed', j.message || 'The email could not be sent.');
+        } catch (e) { if (e && e.code === 'email_failed') throw e; }
+      }
       var rec = { id: String(Date.now()).padStart(15, '0') + '-' + rid(3), app: APP, at: Date.now(), to: to, cc: [].concat(msg.cc || []), subject: msg.subject || '', text: msg.text || '', html: msg.html ? String(msg.html).slice(0, 200000) : undefined, attachments: (msg.attachments || []).map(function (a) { return { filename: a.filename, contentType: a.contentType }; }) };
       var box = outbox(); box.push(rec); try { LS.setItem(OUTBOX, JSON.stringify(box.slice(-200))); } catch (e) {}
-      post('toast', { message: 'Email kept in your Outbox — Everything doesn’t send mail from this device.' });
+      post('toast', { message: 'Email kept in your Outbox — sending mail isn’t set up on this hub yet.' });
       return { delivered: to, failed: [], suppressed: [], local: true, outbox: true, id: rec.id };
     },
     async sendTransactional(msg) { return email.send(msg); },
@@ -787,17 +833,38 @@
   var WK = 'everything:workers', HK = 'everything:hosting';
   function readJ(k, d) { try { return JSON.parse(LS.getItem(k) || 'null') || d; } catch (e) { return d; } }
   function writeJ(k, v) { try { LS.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function workerName(n) { return String(n || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || ('w-' + rid(4)); }
   var workers = {
     async create(name, filePath) {
-      var all = readJ(WK, {});
-      all[name] = { name: name, url: 'local://worker/' + name, file_path: normPath(filePath || ''), app: APP, created_at: new Date().toISOString(), local: true };
+      var n = workerName(name), all = readJ(WK, {});
+      all[n] = { name: n, url: 'https://' + n + '.ehub.work', file_path: normPath(filePath || ''), app: APP, created_at: new Date().toISOString() };
       writeJ(WK, all);
-      return { success: true, name: name, url: all[name].url, file_path: all[name].file_path, errors: [] };
+      if (ONLINE) {
+        try {
+          var r = await nativeFetch(ORIGIN + '/api/w/' + encodeURIComponent(APP) + '/' + n + '/__deploy', { method: 'POST', headers: { 'x-ehub-auth': AUTH_TOKEN } });
+          if (!r.ok) { var j = await r.json().catch(function () { return {}; }); return { success: false, name: n, errors: [j.message || 'This app has no team server on Everything Hub.'] }; }
+        } catch (e) { return { success: false, name: n, errors: ['Could not reach the Everything Hub server.'] }; }
+      }
+      return { success: true, name: n, url: all[n].url, file_path: all[n].file_path, errors: [] };
     },
-    async get(name) { var w = readJ(WK, {})[name]; return w ? Object.assign({}, w) : undefined; },
+    async get(name) { var w = readJ(WK, {})[workerName(name)]; return w ? Object.assign({}, w) : undefined; },
     async list() { var all = readJ(WK, {}); return Object.keys(all).map(function (k) { return all[k]; }); },
-    async delete(name) { var all = readJ(WK, {}); delete all[name]; writeJ(WK, all); return true; },
-    async exec(url, init) { return refusedResponse(url); },
+    async delete(name) { var all = readJ(WK, {}); delete all[workerName(name)]; writeJ(WK, all); return true; },
+    async exec(url, init) {
+      init = Object.assign({}, init || {});
+      var h = new Headers(init.headers || (url && url.headers) || {});
+      if (h.has('x-ehub-no-auth')) h.delete('x-ehub-no-auth');
+      else { h.set('x-ehub-auth', AUTH_TOKEN); if (!h.has('ehub-auth')) h.set('ehub-auth', AUTH_TOKEN); }
+      var proofs = [];
+      h.forEach(function (v, k) { if (/^x-[a-z-]+-proof$/.test(k)) proofs.push(v); });
+      for (var pi = 0; pi < proofs.length; pi++) {
+        try { var pj = JSON.parse(proofs[pi]); if (pj && pj.path) { var pb = await fs.read(pj.path); if (pb.size <= 4096) { h.set('x-ehub-proof-path', encodeURIComponent(normPath(pj.path))); h.set('x-ehub-proof-file', b64url(await pb.text())); } } } catch (e) {}
+      }
+      init.headers = h;
+      var target = workerTarget(url) || String(url && url.url ? url.url : url);
+      if (isBlockedURL(target)) return refusedResponse(target);
+      return nativeFetch(target, init);
+    },
     async getLoggingHandle() { return { close: function () {}, addEventListener: function () {} }; },
   };
   var hosting = {
@@ -820,7 +887,7 @@
 
   /* -------------------------------------------------------------------- peer */
   var peer = (function () {
-    var CH = 'everything:peer', NO_HOST_MS = 2500;
+    var CH = 'everything:peer', NO_HOST_MS = ONLINE ? 9000 : 2500;
     var rand = function (n) { return Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(n || 6)), function (b) { return 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b % 32]; }).join(''); };
     var ev = function (type, props) { return Object.assign(new Event(type), props || {}); };
     var me = { uuid: USER.uuid + ':' + rid(3), username: USERNAME };
@@ -848,17 +915,38 @@
     Server.prototype.on = function (t, fn) { this.addEventListener(t, fn); return this; };
     Server.prototype.close = function () { if (this.closed) return; this.closed = true; this.connections.forEach(function (c) { c.close('server closed'); }); this.connections.clear(); this._onClose && this._onClose(); };
     var bus = null; try { bus = new BroadcastChannel(CH); } catch (e) {}
-    var servers = new Map(), dials = new Map(), serving = new Map(), RTC = { iceServers: [] };
-    function postBus(msg) { try { bus && bus.postMessage(msg); } catch (e) {} handle(msg); }
+    var servers = new Map(), dials = new Map(), serving = new Map(), RTC = { iceServers: ONLINE ? [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }] : [] };
+    var sockets = new Map();
+    function sig(code) {
+      code = String(code); if (!ONLINE || typeof WebSocket === 'undefined') return null;
+      var rec = sockets.get(code); if (rec) return rec;
+      rec = { q: [], ws: null, users: 0 };
+      try {
+        var ws = new NWS(ORIGIN.replace(/^http/, 'ws') + '/api/peer/' + encodeURIComponent(code));
+        rec.ws = ws;
+        ws.onopen = function () { var q = rec.q.splice(0); q.forEach(function (m) { ws.send(m); }); };
+        ws.onmessage = function (e) { var m; try { m = JSON.parse(e.data); } catch (x) { return; } handle(m); };
+        ws.onclose = function () { if (sockets.get(code) === rec) sockets.delete(code); };
+      } catch (e) { return null; }
+      sockets.set(code, rec); return rec;
+    }
+    function sigSend(code, msg) { var r = sig(code); if (!r) return; var d = JSON.stringify(msg); if (r.ws && r.ws.readyState === 1) r.ws.send(d); else r.q.push(d); }
+    function sigClose(code) { var r = sockets.get(String(code)); if (r) { sockets.delete(String(code)); try { r.ws.close(); } catch (e) {} } }
+    var connCode = new Map();
+    function postBus(msg) {
+      try { bus && bus.postMessage(msg); } catch (e) {}
+      var code = msg.code || connCode.get(msg.connId); if (code) sigSend(code, msg);
+      handle(msg);
+    }
     if (bus) bus.onmessage = function (e) { handle(e.data); };
     async function feed(rec, c) { if (!rec.pc.remoteDescription) { rec.queued.push(c); return; } try { await rec.pc.addIceCandidate(c || undefined); } catch (e) {} }
     async function flush(rec) { var q = rec.queued.splice(0); for (var i = 0; i < q.length; i++) await feed(rec, q[i]); }
     async function handle(msg) {
       if (!msg || typeof msg !== 'object') return;
       if (msg.t === 'dial') {
-        var srv = servers.get(msg.code); if (!srv || srv.closed) return;
+        var srv = servers.get(msg.code); if (!srv || srv.closed || serving.has(msg.connId)) return;
         var pc = new RTCPeerConnection(RTC), conn = new Conn(pc, { owner: Object.assign({}, me), room: /^[a-z]/.test(msg.code) ? msg.code : undefined });
-        var rec = { pc: pc, conn: conn, queued: [] }; serving.set(msg.connId, rec);
+        var rec = { pc: pc, conn: conn, queued: [] }; serving.set(msg.connId, rec); connCode.set(msg.connId, msg.code);
         pc.ondatachannel = function (e) { conn.attach(e.channel); };
         pc.onicecandidate = function (e) { postBus({ t: 'ice', connId: msg.connId, to: 'dialer', candidate: e.candidate ? e.candidate.toJSON() : null }); };
         conn.addEventListener('close', function () { serving.delete(msg.connId); srv.connections.delete(msg.connId); });
@@ -884,19 +972,19 @@
         if (opts.name !== undefined && !/^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])?$/.test(String(opts.name))) throw new TypeError('Not a valid room name');
         var code = opts.name || ('EV-' + rand());
         var old = servers.get(code); if (old) old.close();
-        var s = new Server(code); s._onClose = function () { if (servers.get(code) === s) servers.delete(code); };
+        var s = new Server(code); s._onClose = function () { if (servers.get(code) === s) servers.delete(code); sigClose(code); }; sig(code);
         servers.set(code, s); return s;
       },
       async connect(code) {
         if (typeof RTCPeerConnection === 'undefined') throw err('not_supported', 'Peer connections are not available in this browser');
         var pc = new RTCPeerConnection(RTC), connId = rand(8);
         var conn = new Conn(pc, { owner: null, room: /^[a-z]/.test(String(code)) ? code : undefined });
-        conn.attach(pc.createDataChannel('puter'));
-        var rec = { pc: pc, conn: conn, queued: [], answered: false, timer: null }; dials.set(connId, rec);
+        conn.attach(pc.createDataChannel('everything'));
+        var rec = { pc: pc, conn: conn, queued: [], answered: false, timer: null }; dials.set(connId, rec); connCode.set(connId, String(code));
         conn.addEventListener('close', function () { clearTimeout(rec.timer); dials.delete(connId); });
         pc.onicecandidate = function (e) { postBus({ t: 'ice', connId: connId, to: 'server', candidate: e.candidate ? e.candidate.toJSON() : null }); };
         await pc.setLocalDescription(await pc.createOffer());
-        rec.timer = setTimeout(function () { if (rec.answered || conn.closed) return; var e = err('invalid_invite', 'No one is hosting that code on this device. Online play between devices needs Puter; locally, open the game in another tab.'); conn._fire('error', { error: e }); conn.close('invalid_invite'); }, NO_HOST_MS);
+        rec.timer = setTimeout(function () { if (rec.answered || conn.closed) return; var e = err('invalid_invite', 'No one is hosting that code right now. Check the code and that the host still has the app open.'); conn._fire('error', { error: e }); conn.close('invalid_invite'); }, NO_HOST_MS);
         postBus({ t: 'dial', code: String(code), connId: connId, from: { uuid: me.uuid, username: me.username }, offer: pc.localDescription.toJSON() });
         return conn;
       },
@@ -1106,11 +1194,11 @@
     on: function (ev, cb) { msgHandlers.push({ ev: ev, cb: cb }); }, off: function () {},
     getLanguage: function () { return Promise.resolve((navigator.language || 'en').split('-')[0]); },
     requestPermission: function () { return Promise.resolve(true); },
-    authenticateWithPuter: function () { return Promise.resolve(Object.assign({}, USER)); },
+    authenticateWithEhub: function () { return Promise.resolve(Object.assign({}, USER)); },
     showFeedbackDialog: function () { return Promise.resolve(); },
     socialShare: function (url) { try { if (navigator.share) return navigator.share({ url: url }); } catch (e) {} return Promise.resolve(); },
     notify: function (o) { post('toast', { message: typeof o === 'string' ? o : (o && (o.text || o.title)) || '' }); return Promise.resolve(); },
-    exit: function () { return puterObj.exit(); },
+    exit: function () { return ehubObj.exit(); },
     isWindowFocused: function () { return document.hasFocus(); },
   };
   var pendingItems = null;
@@ -1127,7 +1215,7 @@
     if (e.origin !== location.origin || !e.data || e.data.everything !== 1 || e.source !== window.parent) return;
     var d = e.data;
     if (d.type === 'items' && Array.isArray(d.items)) deliverItems(d.items);
-    if (d.type === 'requestClose') { if (closeHandler) { try { closeHandler(); } catch (x) { puterObj.exit(); } } else puterObj.exit(); }
+    if (d.type === 'requestClose') { if (closeHandler) { try { closeHandler(); } catch (x) { ehubObj.exit(); } } else ehubObj.exit(); }
     if (d.type === 'message') msgHandlers.forEach(function (h) { if (h.ev === 'message') try { h.cb(d.data); } catch (x) {} });
   });
   try {
@@ -1137,23 +1225,30 @@
 
   /* ------------------------------------------------------------------- net */
   var net = {
-    fetch: function (u, init) { return window.fetch(u, init); },
+    fetch: function (u, init) {
+      var url = parseURL(u);
+      if (!ONLINE || !url || url.origin === ORIGIN || workerTarget(u) || isBlockedURL(u)) return window.fetch(u, init);
+      init = Object.assign({}, init || {});
+      var h = new Headers(init.headers || {}); h.set('x-ehub-target', url.href); h.set('x-ehub-auth', AUTH_TOKEN);
+      init.headers = h;
+      return nativeFetch(ORIGIN + '/api/fetch', init);
+    },
     Socket: function () { var t = new EventTarget(); t.write = function () {}; t.close = function () {}; t.on = function (n, f) { t.addEventListener(n, function (e) { f(e.detail); }); }; setTimeout(function () { t.dispatchEvent(new CustomEvent('error', { detail: 'Raw sockets are not available in Everything' })); }, 0); return t; },
   };
   net.tls = { TLSSocket: net.Socket };
 
-  /* ------------------------------------------------------------ puter global */
+  /* ------------------------------------------------------------ ehub global */
   var ADJ = ['amber', 'brisk', 'calm', 'dapper', 'eager', 'fancy', 'gentle', 'happy', 'ivory', 'jolly', 'kind', 'lucky', 'mellow', 'nimble', 'olive', 'plucky', 'quiet', 'rosy', 'sunny', 'tidy', 'umber', 'vivid', 'warm', 'young', 'zesty'];
   var NOUN = ['acorn', 'brook', 'cedar', 'dune', 'ember', 'fern', 'grove', 'harbor', 'iris', 'juniper', 'kite', 'lark', 'meadow', 'nest', 'orchid', 'pebble', 'quill', 'river', 'sparrow', 'thistle', 'umbra', 'valley', 'willow', 'yarrow', 'zephyr'];
-  var puterObj = {
+  var ehubObj = {
     __everything: true,
-    version: '2.0.0-everything-local',
+    version: '3.0.0-everything-hub',
     env: 'web',
     appID: APP,
     appName: APP,
     appDataPath: HOME + '/AppData/' + APP,
-    APIOrigin: 'https://api.puter-local.invalid',
-    defaultAPIOrigin: 'https://api.puter-local.invalid',
+    APIOrigin: ONLINE ? ORIGIN : 'https://api.everything-hub.invalid',
+    defaultAPIOrigin: 'https://api.everything-hub.invalid',
     defaultGUIOrigin: location.origin,
     authToken: AUTH_TOKEN,
     username: USERNAME,
@@ -1165,10 +1260,10 @@
     setAuthToken: function () {}, setAPIOrigin: function () {}, setAppID: function () {}, resetAuthToken: function () {},
     initSubmodules: function () {}, configure: function () {},
     randName: function (sep) { sep = sep == null ? '-' : sep; return ADJ[Math.random() * ADJ.length | 0] + sep + NOUN[Math.random() * NOUN.length | 0] + sep + (Math.random() * 10000 | 0); },
-    print: function () { var s = Array.prototype.slice.call(arguments).join(' '); console.log('[puter.print]', s); try { var d = document.createElement('div'); d.innerHTML = s; (document.body || document.documentElement).appendChild(d); } catch (e) {} },
+    print: function () { var s = Array.prototype.slice.call(arguments).join(' '); console.log('[print]', s); try { var d = document.createElement('div'); d.innerHTML = s; (document.body || document.documentElement).appendChild(d); } catch (e) {} },
     exit: function (code) { post('exit', { code: code || 0 }); return Promise.resolve(); },
     on: function () {}, off: function () {},
-    isLocal: true,
+    isLocal: !ONLINE,
   };
 
   /* Never throw on missing members: unknown properties become harmless no-ops. */
@@ -1203,9 +1298,9 @@
     });
   }
   var wrapped = {};
-  var puter = wrap(puterObj, 'puter', 0);
-  try { Object.defineProperty(window, 'puter', { value: puter, writable: true, configurable: true, enumerable: true }); } catch (e) { window.puter = puter; }
-  window.__puterLocal = { app: APP, user: USER, normPath: normPath, db: db, aiConfig: aiConfig };
+  var ehub = wrap(ehubObj, 'ehub', 0);
+  try { Object.defineProperty(window, 'ehub', { value: ehub, writable: true, configurable: true, enumerable: true }); } catch (e) { window.ehub = ehub; }
+  window.__ehubCore = { app: APP, user: USER, normPath: normPath, db: db, aiConfig: aiConfig };
 
   /* Hub shortcuts from inside an app: Cmd/Ctrl+K and Cmd/Ctrl+1..9, unless the app handled them. */
   if (IN_FRAME) window.addEventListener('keydown', function (e) {
@@ -1215,7 +1310,7 @@
     if (k === 'k' || /^[1-9]$/.test(k)) { e.preventDefault(); post('key', { combo: 'mod+' + k }); }
   });
 
-  bootstrap().catch(function (e) { console.warn('[puter-local] drive unavailable', e); });
+  bootstrap().catch(function (e) { console.warn('[ehub-local] drive unavailable', e); });
   post('ready', { title: document.title });
-  try { document.dispatchEvent(new Event('puter.ready')); window.dispatchEvent(new Event('puter-ready')); } catch (e) {}
+  try { document.dispatchEvent(new Event('ehub.ready')); window.dispatchEvent(new Event('ehub-ready')); } catch (e) {}
 })();

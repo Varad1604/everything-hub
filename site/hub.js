@@ -442,7 +442,7 @@
 
   function resolveApp(name) {
     if (!name) return null;
-    const n = String(name).toLowerCase().replace(/^puter[-_]/, '').replace(/\s+/g, '-');
+    const n = String(name).toLowerCase().replace(/^ehub[-_]/, '').replace(/\s+/g, '-');
     if (byId.has(n)) return byId.get(n);
     return APPS.find((a) => a.aliases.includes(n) || a.name.toLowerCase() === n.replace(/-/g, ' ')) || APPS.find((a) => a.id.startsWith(n) || n.startsWith(a.id));
   }
@@ -579,7 +579,7 @@
       { kind: 'action', label: 'Go home', sub: 'Back to all your apps', icon: I.home, run: () => go('#/'), keys: 'home back' },
       { kind: 'action', label: root.dataset.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode', sub: 'Theme', icon: root.dataset.theme === 'dark' ? I.sun : I.moon, run: () => { state.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; save(); applyTheme(); }, keys: 'theme dark light mode night' },
       { kind: 'action', label: 'Open settings', sub: 'Theme, wallpaper, AI and your data', icon: I.gear, run: () => openSheet(), keys: 'preferences settings options' },
-      { kind: 'action', label: aiOn() ? 'AI settings' : 'Turn on AI', sub: 'Use your own OpenAI-compatible key', icon: I.spark, run: () => openSheet('ai'), keys: 'ai key openai model assistant gpt' },
+      { kind: 'action', label: 'AI settings', sub: aiOn() ? 'Using your own OpenAI-compatible key' : 'Built-in AI is on — optionally use your own key', icon: I.spark, run: () => openSheet('ai'), keys: 'ai key openai model assistant gpt' },
       { kind: 'action', label: 'Export all my data', sub: 'Download a backup of everything', icon: I.down, run: exportData, keys: 'backup export download save' },
       t ? { kind: 'action', label: `Reload ${byId.get(t.id).name}`, sub: 'Refresh the current app', icon: I.reload, run: reloadActive, keys: 'reload refresh' } : null,
       t ? { kind: 'action', label: `Close ${byId.get(t.id).name}`, sub: 'Close the current app', icon: I.close, run: () => closeTab(t.id), keys: 'close quit' } : null,
@@ -700,7 +700,7 @@
       localStorage.setItem('everything:ai', JSON.stringify({ endpoint, apiKey, model: model || 'gpt-4o-mini' }));
       fillSettings(); toast('AI is on for every app.');
     });
-    $('#aiClear').addEventListener('click', () => { localStorage.removeItem('everything:ai'); fillSettings(); toast('AI is off.'); });
+    $('#aiClear').addEventListener('click', () => { localStorage.removeItem('everything:ai'); fillSettings(); toast('Back to the built-in AI.'); });
     $('#aiTest').addEventListener('click', async () => {
       const endpoint = $('#aiEndpoint').value.trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, ''), apiKey = $('#aiKey').value.trim(), model = $('#aiModel').value.trim() || 'gpt-4o-mini';
       if (!endpoint) { toast('Add an endpoint first.'); return; }

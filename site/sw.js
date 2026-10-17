@@ -1,13 +1,13 @@
 /* Everything — service worker.
  * Shell: network-first with cache fallback (updates land, offline still works).
  * Apps & icons: stale-while-revalidate, cached lazily the first time each is opened.
- * Puter hosts: never contacted. js.puter.com is answered with the local shim. */
-const VERSION = 'everything-v1-nolocal2';
+ * Retired hosts (*.invalid) are never contacted; the old SDK address is answered with everything-core.js. */
+const VERSION = 'everything-v3-core';
 const SHELL = `${VERSION}-shell`;
 const APPS = `${VERSION}-apps`;
 const FONTS = `${VERSION}-fonts`;
-const SHELL_FILES = ['./', 'index.html', 'hub.css', 'hub.js', 'apps.json', 'puter-local.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'icon-180.png', 'icon-32.png', 'fonts.css', 'fonts/InstrumentSerif-italic-latin-1.woff2', 'fonts/InstrumentSerif-italic-latin-ext-0.woff2', 'fonts/InstrumentSerif-normal-latin-3.woff2', 'fonts/InstrumentSerif-normal-latin-ext-2.woff2', 'fonts/Inter-normal-latin-5.woff2', 'fonts/Inter-normal-latin-ext-4.woff2'];
-const PUTER = /(^|\.)(puter\.(com|work|site|app|io|dev)|puter-local\.invalid)$/i;
+const SHELL_FILES = ['./', 'index.html', 'hub.css', 'hub.js', 'apps.json', 'everything-core.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'icon-180.png', 'icon-32.png', 'fonts.css', 'fonts/InstrumentSerif-italic-latin-1.woff2', 'fonts/InstrumentSerif-italic-latin-ext-0.woff2', 'fonts/InstrumentSerif-normal-latin-3.woff2', 'fonts/InstrumentSerif-normal-latin-ext-2.woff2', 'fonts/Inter-normal-latin-5.woff2', 'fonts/Inter-normal-latin-ext-4.woff2'];
+const EHUB = /\.invalid$/i;
 const TRACKERS = /(^|\.)(plausible\.io|google-analytics\.com|googletagmanager\.com|analytics\.google\.com|segment\.io|cdn\.segment\.com|mixpanel\.com|hotjar\.com|posthog\.com|sentry\.io)$/i;
 
 self.addEventListener('install', (e) => {
@@ -26,9 +26,9 @@ const inShell = (url) => url.origin === scopeURL.origin && SHELL_FILES.some((f) 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
-  if (PUTER.test(url.hostname)) {
-    if (/^js\.puter\.com$/i.test(url.hostname)) {
-      e.respondWith(caches.match(new URL('puter-local.js', scopeURL).href).then((r) => r || fetch(new URL('puter-local.js', scopeURL))).catch(() => new Response('', { headers: { 'content-type': 'text/javascript' } })));
+  if (EHUB.test(url.hostname)) {
+    if (/^sdk\.everything-hub\.invalid$/i.test(url.hostname)) {
+      e.respondWith(caches.match(new URL('everything-core.js', scopeURL).href).then((r) => r || fetch(new URL('everything-core.js', scopeURL))).catch(() => new Response('', { headers: { 'content-type': 'text/javascript' } })));
     } else {
       e.respondWith(new Response(JSON.stringify({ success: false, error: { code: 'offline_local', message: 'Everything runs locally.' } }), { status: 503, headers: { 'content-type': 'application/json' } }));
     }

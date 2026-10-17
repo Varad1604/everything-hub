@@ -67,7 +67,7 @@
 		evRegion: (wsId) => `tc:ws:${wsId}:ev:`,
 		/**
 		* One shard of the signal region: `tc:ws:{wsId}:ev:s{n}`, exactly five
-		* `:`-segments. A Puter Events subscription anchors on an exact key only
+		* `:`-segments. An Everything Hub Events subscription anchors on an exact key only
 		* while it is within six segments; past that the anchor falls back to the
 		* first six and the whole key becomes a filter, which — in a naming where
 		* the shard index sat beyond that point — would put every shard on one
@@ -533,7 +533,7 @@
 	/**
 	* Small helpers for the worker: error shape, JSON responses, caller identity,
 	* and the atomic block append. `me` is the worker runtime's global for the
-	* owner's Puter resources; everything shared lives in `me.puter.kv`.
+	* owner's Everything Hub resources; everything shared lives in `me.ehub.kv`.
 	*/
 	var HttpError = class extends Error {
 		constructor(status, code, message, headers = null) {
@@ -543,8 +543,8 @@
 			if (headers) this.headers = headers;
 		}
 	};
-	var kv = () => me.puter.kv;
-	var fs = () => me.puter.fs;
+	var kv = () => me.ehub.kv;
+	var fs = () => me.ehub.fs;
 	/**
 	* Build id of this bundle, compiled in by vite.worker.config.js from a hash
 	* of the worker's source. The app compares it with the id in the bundle it
@@ -554,15 +554,15 @@
 	var WORKER_BUILD = "2234130e21f1";
 	/** When the bundle was built, so two builds can be ordered (0 from source). */
 	var WORKER_BUILT_AT = 1792227428228;
-	/** The puter.js build the platform baked into this deploy (its preamble's first
+	/** The ehub.js build the platform baked into this deploy (its preamble's first
 	*  line); read on each call because the preamble exists only once deployed.
 	*  Null from source (tests, mock.html). */
-	var workerRuntime = () => typeof __PUTER_PREAMBLE_VERSION__ === "string" ? __PUTER_PREAMBLE_VERSION__ : null;
+	var workerRuntime = () => typeof __EHUB_PREAMBLE_VERSION__ === "string" ? __EHUB_PREAMBLE_VERSION__ : null;
 	/**
 	* Whose account this worker runs in. Each workspace owner deploys their own
 	* copy, so only that account may create workspaces here: anyone else could
 	* otherwise store data in the owner's KV at the owner's expense. The owner is
-	* asked from the runtime (`me.puter.auth.getUser()`) and remembered in
+	* asked from the runtime (`me.ehub.auth.getUser()`) and remembered in
 	* `tc:config`; if the runtime cannot say, the first account to create a
 	* workspace claims the worker (the deploy flow does so within seconds of
 	* creating it). `tc:config.open` lets an owner run a shared worker anyone
@@ -574,7 +574,7 @@
 		if (configCache) return configCache;
 		const cfg = await kv().get("tc:config") || {};
 		if (!cfg.owner) try {
-			const info = me.puter.auth && typeof me.puter.auth.getUser === "function" ? await me.puter.auth.getUser() : null;
+			const info = me.ehub.auth && typeof me.ehub.auth.getUser === "function" ? await me.ehub.auth.getUser() : null;
 			if (info && info.uuid) {
 				cfg.owner = String(info.uuid);
 				await kv().update(CONFIG_KEY, { owner: cfg.owner }).catch(() => {});
@@ -616,7 +616,7 @@
 		throw new HttpError(status, code, message, headers);
 	}
 	/**
-	* Let the runtime finish `deferred` after the answer has gone out. A Puter
+	* Let the runtime finish `deferred` after the answer has gone out. An Everything Hub
 	* worker's event carries `waitUntil` (the service-worker method): the
 	* promise keeps the isolate alive without holding the response, which is
 	* what lets the search index, the pushes and the change signal ride behind
@@ -634,7 +634,7 @@
 		await all;
 	}
 	/**
-	* Say how long the answer took, and how much of that was spent asking Puter
+	* Say how long the answer took, and how much of that was spent asking Everything Hub
 	* who the caller is (`auth`, and 0 where a cached identity answered it —
 	* see IDENTITY_TTL_MS). The rest is the store, which is round trips in a
 	* row, so `total - auth` divided by the calls a route makes is what one
@@ -658,11 +658,11 @@
 		} catch {}
 		return res;
 	}
-	/** The host this worker is reached at (teamchat-xxx.puter.work), learned from requests, for links in pushes. */
+	/** The host this worker is reached at (teamchat-xxx.ehub.work), learned from requests, for links in pushes. */
 	var workerHost = null;
 	/**
 	* Wrap a route handler: thrown HttpErrors become JSON error responses with
-	* the same { error, code, message } shape Puter itself uses; anything else
+	* the same { error, code, message } shape Everything Hub itself uses; anything else
 	* is a 500 that says so without leaking a stack. The handler is also given
 	* `ctx.defer(work)` for anything the answer does not depend on (see
 	* settleDeferred).
@@ -701,7 +701,7 @@
 	/**
 	* How long an answered identity is reused for the token that earned it.
 	*
-	* Identifying a caller is an HTTP call to Puter (`getUser()` is a GET of
+	* Identifying a caller is an HTTP call to Everything Hub (`getUser()` is a GET of
 	* /whoami), made on every request this worker serves — a poll every few
 	* seconds from every open tab, and once more for every message, read,
 	* reaction and keystroke burst. It is also the one thing that cannot be
@@ -711,7 +711,7 @@
 	* So an answer is kept for this long, against a hash of the token that
 	* earned it. The cost is that a session ended elsewhere — signed out,
 	* revoked — goes on being accepted by an already-running isolate for up to
-	* this long. Half a minute is short against how long a Puter session lives
+	* this long. Half a minute is short against how long an Everything Hub session lives
 	* and close to the poll interval the app already runs on, and it is the
 	* whole of the exposure: nothing is cached across isolates, nothing is
 	* written down, and a token that was never valid is never cached at all.
@@ -722,8 +722,8 @@
 	var IDENTITY_MAX = 500;
 	var identityCache = /* @__PURE__ */ new Map();
 	/**
-	* Who is calling. puter.workers.exec() forwards the caller's token, and the
-	* runtime hands it to us as `user.puter`; asking Puter who that token belongs
+	* Who is calling. ehub.workers.exec() forwards the caller's token, and the
+	* runtime hands it to us as `user.ehub`; asking Everything Hub who that token belongs
 	* to is the only trustworthy identity, so nothing in a request body is ever
 	* believed about who sent it. The answer is then reused for a short while
 	* (see IDENTITY_TTL_MS), which is the only way this call comes off the front
@@ -736,11 +736,11 @@
 	var authMs = /* @__PURE__ */ new WeakMap();
 	/** The cache key a caller's token falls under, or null where nothing may be cached for them. */
 	async function identityKey(user) {
-		const token = typeof user?.puter?.authToken === "string" ? user.puter.authToken : null;
+		const token = typeof user?.ehub?.authToken === "string" ? user.ehub.authToken : null;
 		return token && true ? sha256(token) : null;
 	}
 	/**
-	* Who the caller is, if that is already known — without asking Puter, and
+	* Who the caller is, if that is already known — without asking Everything Hub, and
 	* without refusing anyone: null means "not known yet", never "not allowed".
 	*
 	* This is what lets a request make one read instead of two. Every key a
@@ -750,7 +750,7 @@
 	* identity call and the caller's document after it. Costs a hash, no I/O.
 	*/
 	async function peekIdentity(user) {
-		if (!user || !user.puter) return null;
+		if (!user || !user.ehub) return null;
 		const key = await identityKey(user);
 		if (!key) return null;
 		const hit = identityCache.get(key);
@@ -762,7 +762,7 @@
 		return null;
 	}
 	async function identify(user) {
-		if (!user || !user.puter) fail(401, "unauthorized", "Sign in with Puter to continue");
+		if (!user || !user.ehub) fail(401, "unauthorized", "Sign in with Everything Hub to continue");
 		const key = await identityKey(user);
 		if (key) {
 			const hit = identityCache.get(key);
@@ -775,13 +775,13 @@
 		const started = Date.now();
 		let info = null;
 		try {
-			const p = user.puter;
+			const p = user.ehub;
 			info = p.auth && typeof p.auth.getUser === "function" ? await p.auth.getUser() : await p.getUser();
 		} catch {
 			info = null;
 		}
 		authMs.set(user, Date.now() - started);
-		if (!info || !info.uuid) fail(401, "unauthorized", "Your Puter session is not valid");
+		if (!info || !info.uuid) fail(401, "unauthorized", "Your Everything Hub session is not valid");
 		const id = {
 			uuid: String(info.uuid),
 			username: String(info.username || "").toLowerCase()
@@ -2574,7 +2574,7 @@
 					signal: AbortSignal.timeout(Math.min(TIMEOUT_MS, left)),
 					headers: {
 						Accept: accept,
-						"User-Agent": "Teamchat link preview (+https://github.com/HeyPuter/teamchat)"
+						"User-Agent": "Teamchat link preview (+#)"
 					}
 				});
 			} catch {
@@ -3099,7 +3099,7 @@
 		return soundKeys(next.vapid) ? next.vapid : vapid;
 	}
 	/** A VAPID Authorization header for `endpoint`, valid twelve hours. */
-	async function vapidAuth(endpoint, keys, subject = "mailto:teamchat@puter.com") {
+	async function vapidAuth(endpoint, keys, subject = "mailto:teamchat@ehub.com") {
 		const aud = new URL(endpoint).origin;
 		const header = b64url$1(enc$2.encode(JSON.stringify({
 			typ: "JWT",
@@ -3249,14 +3249,14 @@
 		return `app-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 	}
 	/**
-	* The app uid a Puter auth token carries, or null: no token, a user-scoped
+	* The app uid an Everything Hub auth token carries, or null: no token, a user-scoped
 	* session with no app claim at all, or anything that will not parse. Both
 	* the worker and the client decode it themselves, and from both claim
 	* forms, because a v2 token — the only kind the platform has signed for
 	* years — never carries `app_uid` at all: signing compresses the payload,
 	* and the auth scope's table maps `app_uid` to `au`, whose value is the uuid
 	* with its `app-` prefix stripped, its dashes removed and its hex packed
-	* into base64. Reading `app_uid` alone, on the reasoning that puter.js's own
+	* into base64. Reading `app_uid` alone, on the reasoning that ehub.js's own
 	* getAppIDFromAuthToken is undocumented and should not be depended on, found
 	* nothing in any token the platform actually signs: every worker read as
 	* user-scoped, every bootstrap left the `events` block out, and the whole
@@ -3297,7 +3297,7 @@
 	*/
 	function workerAppUid() {
 		try {
-			return appUidFromToken(me?.puter?.authToken);
+			return appUidFromToken(me?.ehub?.authToken);
 		} catch {
 			return null;
 		}
@@ -3308,7 +3308,7 @@
 	*/
 	function callerAppUid(user) {
 		try {
-			return appUidFromToken(user?.puter?.authToken);
+			return appUidFromToken(user?.ehub?.authToken);
 		} catch {
 			return null;
 		}
@@ -3324,7 +3324,7 @@
 	* worker anyway, so six hours costs nothing real. Consent
 	* (events_kv_handle_not_delegated) is different: it is the one code a
 	* person can flip from outside the app entirely, at any moment, with
-	* nothing telling the worker — granted from the Puter GUI, another device,
+	* nothing telling the worker — granted from the Everything Hub GUI, another device,
 	* or a session long since closed, none of which touches this worker's
 	* cached verdict. An owner's own tab open at the time heals that at once
 	* (see shell.js's healEventsVerdict); this thirty minutes covers the owner
@@ -3357,7 +3357,7 @@
 	};
 	var DEFAULT_MEMBER_BACKOFF_MS = 6e5;
 	/**
-	* Ask Puter for a handle on this workspace's signal region for one grantee.
+	* Ask Everything Hub for a handle on this workspace's signal region for one grantee.
 	* Never throws: a network failure, a timeout, and an error response all come
 	* back as { ok: false, code, why }, which the caller turns into a backoff
 	* rather than a failed request of its own.
@@ -3371,11 +3371,11 @@
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), HANDLE_TIMEOUT_MS);
 		try {
-			const res = await fetch(`${me.puter.APIOrigin}/events/kv-handles`, {
+			const res = await fetch(`${me.ehub.APIOrigin}/events/kv-handles`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					Authorization: `Bearer ${me.puter.authToken}`
+					Authorization: `Bearer ${me.ehub.authToken}`
 				},
 				body: JSON.stringify({
 					granteeUid: granteeUuid,
@@ -3409,7 +3409,7 @@
 		}
 	}
 	/**
-	* Ask Puter to give up one previously minted handle, mirroring mintHandle in
+	* Ask Everything Hub to give up one previously minted handle, mirroring mintHandle in
 	* every way that matters: never throws, the same timeout, and a network
 	* failure or an error response both come back as { ok: false, code, why }.
 	* Retiring an already-revoked handle is idempotent on the platform's side
@@ -3426,11 +3426,11 @@
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), HANDLE_TIMEOUT_MS);
 		try {
-			const res = await fetch(`${me.puter.APIOrigin}/events/kv-handles/${encodeURIComponent(handle)}`, {
+			const res = await fetch(`${me.ehub.APIOrigin}/events/kv-handles/${encodeURIComponent(handle)}`, {
 				method: "DELETE",
 				headers: {
 					"Content-Type": "application/json",
-					Authorization: `Bearer ${me.puter.authToken}`
+					Authorization: `Bearer ${me.ehub.authToken}`
 				},
 				signal: controller.signal
 			});
@@ -3551,7 +3551,7 @@
 	* releaseHandle is the only other place a handle is given back, and it reads
 	* `ev.h`, which this is about to overwrite, so a handle abandoned here would
 	* sit on one of the owner's live-handle slots (100 per app, 50 on free)
-	* until cleared by hand from a Puter session. Revoking is idempotent and
+	* until cleared by hand from an Everything Hub session. Revoking is idempotent and
 	* already answers ok on a 404/subject_does_not_exist, so the ordinary case
 	* here — a handle that is already gone, which is why this was called at all
 	* — costs one wasted round trip, while the uncommon one (an app binding
@@ -3596,7 +3596,7 @@
 	* A worker with no app identity used to answer bare null here, so an owner
 	* whose worker can never do events was told nothing, for ever — and
 	* overwriting the worker bundle is not the fix, since a worker's app
-	* identity is settled once, when `puter.workers.create()` makes it; the only
+	* identity is settled once, when `ehub.workers.create()` makes it; the only
 	* remedy is deploying a new worker. `'no_app_uid'` names that case instead,
 	* the same code mintHandle() already answers for it, so a caller only ever
 	* has one name to check.
@@ -3951,7 +3951,7 @@
 	* vouches for its own people: when the two workspaces are connected they
 	* come to share a secret, and the partner's worker signs a short-lived
 	* token naming one of its members. The host checks the signature against
-	* the connection's secret and the named uuid against the Puter identity
+	* the connection's secret and the named uuid against the Everything Hub identity
 	* of whoever presents the token, so a token is only ever good for the
 	* person it names, and only for a few minutes.
 	*
@@ -4044,7 +4044,7 @@
 	var SECRET_RE = /^[a-z0-9]{32}$/;
 	/** A workspace reference as the client writes it: `{wsId}@{server}`. */
 	var REF_RE = /^[a-z0-9]{6,20}@[a-z0-9][a-z0-9._:-]{0,120}$/;
-	/** An invite code from puter.peer.serve() (`NJ-7F3A9C`), or a room name; nothing else is written. */
+	/** An invite code from ehub.peer.serve() (`NJ-7F3A9C`), or a room name; nothing else is written. */
 	var INVITE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/;
 	/** A tab's session id for its seat, made by the client; nothing else is written. */
 	var SESSION_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -4113,13 +4113,13 @@
 	//#endregion
 	//#region worker/index.js
 	/**
-	* Teamchat API: a Puter Serverless Worker.
+	* Teamchat API: an Everything Hub Serverless Worker.
 	*
-	* Every workspace owner runs a copy of this worker in their own Puter
+	* Every workspace owner runs a copy of this worker in their own Everything Hub
 	* account (the app deploys it for them), so a workspace's data lives in its
-	* owner's key-value store (me.puter.kv), which is what lets every member
+	* owner's key-value store (me.ehub.kv), which is what lets every member
 	* read and write the same channels, and the owner pays for it. Callers are
-	* identified by the Puter session that puter.workers.exec() forwards;
+	* identified by the Everything Hub session that ehub.workers.exec() forwards;
 	* nothing about identity is trusted from request bodies. Only the owner may
 	* create workspaces here (see assertMayCreate); members of other people's
 	* workspaces only ever touch data inside those workspaces.
@@ -4138,7 +4138,7 @@
 	*                             partner side { ws, ch, ref, rch, secret } (see worker/connect.js)
 	*   tc:conv:{conv}:seq        message counter (kv.incr)
 	*   tc:conv:{conv}:b:{n}      message block n: { m: [...], x: {overlays} }
-	*   tc:file:{id}              attachment metadata (bytes live in me.puter.fs)
+	*   tc:file:{id}              attachment metadata (bytes live in me.ehub.fs)
 	*   tc:ws:{ws}:pins:{conv}    pinned messages: { items: [{ seq, by, ts }] }
 	*   tc:ws:{ws}:u:{uuid}:inbox   activity inbox ring: { items: [{ k, c, s, by, ts }] }
 	*   tc:ws:{ws}:u:{uuid}:threads followed threads: { t: { [threadId]: { c, s, at } } }
@@ -4744,7 +4744,7 @@
 	* of them go in a single batched read: the workspace, the caller's document,
 	* and whatever else the route asked for (`also`, answered as `extra`).
 	*
-	* Where it is not, asking Puter is an HTTP call of its own, so it runs
+	* Where it is not, asking Everything Hub is an HTTP call of its own, so it runs
 	* beside the workspace read rather than in front of it, and only the
 	* caller's own keys wait on it. Done one after another, as it used to be,
 	* every request here began with three round trips before it looked at
@@ -4774,7 +4774,7 @@
 				...want
 			]);
 		} else {
-			const [idRes, wsRes] = await Promise.allSettled([identify(who), who?.puter ? kv().get(KEYS.ws(wsId)) : null]);
+			const [idRes, wsRes] = await Promise.allSettled([identify(who), who?.ehub ? kv().get(KEYS.ws(wsId)) : null]);
 			if (idRes.status === "rejected") throw idRes.reason;
 			if (wsRes.status === "rejected") throw wsRes.reason;
 			id = idRes.value;
@@ -5633,7 +5633,7 @@
 			if (level === "nothing") return;
 			const event = n.mentioned.has(u) ? "mention" : "message";
 			if (event === "message" && level !== "all") return;
-			const server = (workerHost || "server").replace(/\.puter\.work$/, "");
+			const server = (workerHost || "server").replace(/\.ehub\.work$/, "");
 			const ref = `${ws.id}@${server}`;
 			for (const [sid, sub] of Object.entries(subs)) {
 				if (!sub?.endpoint || !pushAllowed(sub.prefs)) continue;
@@ -6647,7 +6647,7 @@
 		};
 	}));
 	/**
-	* A Puter worker only runs while handling a request, so anything due is
+	* An Everything Hub worker only runs while handling a request, so anything due is
 	* delivered by whichever member's sync poll comes first after its time.
 	* The queue is one document per workspace, a map by id (so entries can be
 	* claimed one at a time), and the earliest due time is kept in the
@@ -7477,7 +7477,7 @@
 	/**
 	* "I am in the huddle here": start one, join the one in progress, or, sent
 	* again every HUDDLE_HEARTBEAT_MS, stay in it. The body carries the invite
-	* code of the caller's own Puter Peer server, which is what the others dial;
+	* code of the caller's own Everything Hub Peer server, which is what the others dial;
 	* the roster that comes back is what the caller dials. Threads have no
 	* huddles of their own (the conversation's is theirs), and a channel has to
 	* be joined, not merely previewed.
@@ -7659,7 +7659,7 @@
 	* that opens, replaces it. Sent keepalive from pagehide; one write.
 	*/
 	router.delete("/api/ws/:ws/presence", route(async ({ params, user }) => {
-		const [id, ws] = await Promise.all([identify(user), user?.puter ? kv().get(KEYS.ws(params.ws)) : null]);
+		const [id, ws] = await Promise.all([identify(user), user?.ehub ? kv().get(KEYS.ws(params.ws)) : null]);
 		if (!ws || !ws.members?.[id.uuid]) fail(403, "forbidden", "You are not a member of this workspace");
 		await recordPresence(params.ws, id.uuid, {}, "off");
 		return { ok: true };
@@ -7680,7 +7680,7 @@
 			...counter
 		]);
 		else {
-			const [idRes, readRes] = await Promise.allSettled([identify(user), user?.puter && named ? getMany([
+			const [idRes, readRes] = await Promise.allSettled([identify(user), user?.ehub && named ? getMany([
 				KEYS.ws(params.ws),
 				KEYS.activity(params.ws),
 				...counter
@@ -10555,7 +10555,7 @@
 	* the id makes the record a direct get, the secret is stored only as a
 	* SHA-256 hash and compared in constant time, and the token is shown to the
 	* admin exactly once. These are the only routes besides /health that take
-	* no Puter session, so they are rate-limited per token and reject oversized
+	* no Everything Hub session, so they are rate-limited per token and reject oversized
 	* bodies before touching storage.
 	*/
 	var TOKEN_RE = /^(tch|tcb)_([a-z0-9]{10})_([a-z0-9]{32})$/;
@@ -12221,7 +12221,7 @@
 		const body = await readJson(request);
 		const to = String(body.to || "");
 		if (!/^[a-z0-9]{6,20}@[a-z0-9][a-z0-9._:-]{0,120}$/.test(to)) fail(400, "invalid", "Bad workspace reference");
-		const serverKey = (host) => String(host || "").toLowerCase().replace(/\.puter\.work$/, "");
+		const serverKey = (host) => String(host || "").toLowerCase().replace(/\.ehub\.work$/, "");
 		const at = to.indexOf("@");
 		if (to.slice(0, at) === ws.id && workerHost && serverKey(to.slice(at + 1)) === serverKey(workerHost)) fail(400, "invalid", "A workspace cannot be moved to itself");
 		await kv().update(KEYS.ws(ws.id), {
@@ -12348,7 +12348,7 @@
 		let readValues;
 		if (ready) readValues = await getMany([KEYS.ws(wsId), ...want]);
 		else {
-			const readable = validWsId(wsId) && who?.puter;
+			const readable = validWsId(wsId) && who?.ehub;
 			const [idRes, readRes] = await Promise.allSettled([identify(who), readable ? getMany([KEYS.ws(wsId), ...want]) : [null]]);
 			if (idRes.status === "rejected") throw idRes.reason;
 			if (readRes.status === "rejected") throw readRes.reason;

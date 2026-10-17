@@ -1,18 +1,18 @@
 /**
  * Service worker: enough to boot the app with no connection, and nothing
  * more. It caches the shell — this app's own HTML, JS, CSS and icons, plus
- * the Puter SDK it cannot start without — and never caches a single byte of
+ * the Everything Hub SDK it cannot start without — and never caches a single byte of
  * anyone's data.
  *
  * That line matters: project documents, the KV index and attachments all
- * travel over the Puter API, and a stale copy served silently from a cache
+ * travel over the Everything Hub API, and a stale copy served silently from a cache
  * would be worse than an error. The app mirrors its own data to IndexedDB
  * (src/lib/mirror.js), where it is explicitly marked as offline; this file
  * stays out of it.
  */
 
 const VERSION = 'pm-shell-v2-nolocal2';
-const SDK = 'https://js-puter-com.invalid/';
+const SDK = 'https://sdk.everything-hub.invalid/';
 
 /**
  * Only the entry documents are known by name; assets are hashed. The two

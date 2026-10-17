@@ -1,0 +1,24 @@
+{
+  // Everything Hub: static apps in ./site plus the /api backend, deployed by Workers Builds on every push to main.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "everything-hub",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./site",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "APP_SERVER", "class_name": "AppServer" },
+      { "name": "PEER_ROOM", "class_name": "PeerRoom" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AppServer", "PeerRoom"] }
+  ],
+  "observability": { "enabled": true }
+}

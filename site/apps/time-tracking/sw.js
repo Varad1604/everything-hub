@@ -39,10 +39,10 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
-  // Never cache Puter API calls, only the SDK script itself.
-  const isPuterSdk = url.origin === 'https://js-puter-com.invalid';
+  // Never cache Everything Hub API calls, only the SDK script itself.
+  const isEhubSdk = url.origin === 'https://sdk.everything-hub.invalid/';
   const isApi = url.hostname.startsWith('api.') || url.pathname.startsWith('/drivers');
-  if (!isPuterSdk && url.origin !== self.location.origin) return;
+  if (!isEhubSdk && url.origin !== self.location.origin) return;
   if (isApi) return;
 
   // Navigations: network-first so users get fresh HTML, cache fallback offline.

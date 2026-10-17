@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <script src="../../puter-local.js"></script>
+    <script src="../../everything-core.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
@@ -12,7 +12,7 @@
 <link rel="icon" href="/favicon-32x32.png" type="image/png" sizes="32x32">
 <link rel="icon" href="/favicon-16x16.png" type="image/png" sizes="16x16">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
-<title>RSVP — Puter Calendar</title>
+<title>RSVP — Everything Hub Calendar</title>
 <style>
   /* Status colors are picked per scheme for WCAG AA contrast (≥4.5:1) as
      16px text on the card and banner backgrounds — not shared across modes. */
@@ -108,9 +108,9 @@
 <script>
 /**
  * Standalone RSVP page. The guest lands here from a worker link
- * (…puter.work/rsvp/<token> redirects to /rsvp.html#w=<worker>&t=<token>);
+ * (…ehub.work/rsvp/<token> redirects to /rsvp.html#w=<worker>&t=<token>);
  * everything below talks to the worker's JSON API (GET/POST /api/rsvp/<token>)
- * — the worker itself serves no HTML. Needs no Puter sign-in and no SDK.
+ * — the worker itself serves no HTML. Needs no Everything Hub sign-in and no SDK.
  *
  * All data is rendered with textContent (never markup), so nothing the host
  * or a guest typed can inject into this page.
@@ -142,8 +142,8 @@
     var justSaved = params.get('s') === '1';
 
     // This page must never become a relay to arbitrary origins: only https
-    // Puter workers, and only well-formed tokens, are ever contacted.
-    if (!/^https:\/\/[a-z0-9][a-z0-9-]*\.puter\.work$/.test(worker) || !/^[0-9a-f]{40}$/.test(token)) {
+    // Everything Hub workers, and only well-formed tokens, are ever contacted.
+    if (!/^https:\/\/[a-z0-9][a-z0-9-]*\.ehub\.work$/.test(worker) || !/^[0-9a-f]{40}$/.test(token)) {
       renderGone();
       return;
     }
@@ -512,12 +512,12 @@
     }
 
     /** A "Join" row rendering the event's meeting link as a real anchor. The
-     *  worker only serves exact Puter Meetings room links, and this page (which
+     *  worker only serves exact Everything Hub Meetings room links, and this page (which
      *  must never become a relay to arbitrary origins) re-checks the shape
      *  before turning worker data into an href. */
     function joinRow(url) {
       if (typeof url !== 'string' || url.length > 100) return;
-      if (!/^https:\/\/meetings\.puter\.com\/#\/m\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|[a-z]{4}-[a-z]{4}-[a-z]{4})$/.test(url)) return;
+      if (!/^https:\/\/everything-hub\.countrypande1\.workers\.dev\/apps\/meetings\/#\/m\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|[a-z]{4}-[a-z]{4}-[a-z]{4})$/.test(url)) return;
       var node = el('div', 'row');
       node.append(el('b', null, 'Join'));
       var a = el('a', null, url);
@@ -569,8 +569,8 @@
       mark.width = 18;
       mark.height = 18;
       link.append(mark);
-      link.append(document.createTextNode('Puter Calendar'));
-      link.href = 'https://puter-com.invalid/app/calendar';
+      link.append(document.createTextNode('Everything Hub Calendar'));
+      link.href = '#';
       link.rel = 'noopener';
       foot.append(link);
       root.append(foot);

@@ -1,8 +1,8 @@
 /**
  * Calendar service worker — makes the app installable and lets the static shell
  * load offline. It is deliberately conservative: it caches ONLY the static app
- * shell (own-origin build output) plus the Puter SDK script, and NEVER touches
- * Puter's data/auth API. That boundary is what keeps offline support from ever
+ * shell (own-origin build output) plus the Everything Hub SDK script, and NEVER touches
+ * Everything Hub's data/auth API. That boundary is what keeps offline support from ever
  * creating sync issues — no user data ever passes through this cache.
  *
  * Shipped verbatim from public/ to the dist root by Vite, so it registers at
@@ -16,11 +16,11 @@
  *   - same-origin static assets → stale-while-revalidate. Vite content-hashes
  *     JS/CSS, so their URLs are immutable; serving cache-first with a background
  *     refresh is safe and instant.
- *   - js.puter.com (the SDK) → network-first with an opaque-cache fallback, so a
+ *   - js.ehub.com (the SDK) → network-first with an opaque-cache fallback, so a
  *     cold start can boot offline. A bad/partial cache self-heals on the next
  *     online load; worst case it degrades to the app's existing 8s SDK-load
  *     timeout, never a hard brick.
- *   - everything else cross-origin (api.puter.com, telemetry, …) → not
+ *   - everything else cross-origin (api.everything-hub.invalid, telemetry, …) → not
  *     intercepted at all (straight to network, never cached).
  *
  * NOTE: skipWaiting()+clients.claim() is safe here specifically because the app
@@ -30,7 +30,7 @@
  * the current one in activate, or drop skipWaiting for activate-on-next-load.
  */
 const CACHE = 'cal-shell-v2-nolocal2';
-const SDK_ORIGIN = 'https://js-puter-com.invalid';
+const SDK_ORIGIN = 'https://sdk.everything-hub.invalid/';
 
 // Minimal, always-present shell. Hashed JS/CSS are cached lazily on first fetch
 // (their names change every build, so they can't be listed here). Precaching
@@ -217,7 +217,7 @@ self.addEventListener('fetch', (event) => {
   const sameOrigin = url.origin === self.location.origin;
   const isSdk = url.origin === SDK_ORIGIN;
 
-  // Ignore all other cross-origin requests (api.puter.com, telemetry, …).
+  // Ignore all other cross-origin requests (api.everything-hub.invalid, telemetry, …).
   if (!sameOrigin && !isSdk) return;
 
   // Wrap every path so a handler bug can never block a request: on any

@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <script src="../../puter-local.js"></script>
+    <script src="../../everything-core.js"></script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#bf3f3f" />
@@ -12,7 +12,7 @@
     <link rel="manifest" href="./manifest.json" />
     <meta
       name="description"
-      content="Open, annotate, fill, and organize PDFs. A private PDF workspace with files in your own Puter cloud."
+      content="Open, annotate, fill, and organize PDFs. A private PDF workspace with files in your own Everything Hub storage."
     />
     <title>PDF Editor</title>
     <script>
@@ -37,7 +37,7 @@
           if (
             desktopMessages.has(event.data?.msg) &&
             !(
-              globalThis.puter?.env === 'app' &&
+              globalThis.ehub?.env === 'app' &&
               window.parent !== window &&
               event.source === window.parent
             )

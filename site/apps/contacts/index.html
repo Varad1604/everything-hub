@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <script src="../../puter-local.js"></script>
+    <script src="../../everything-core.js"></script>
     <meta charset="UTF-8" />
     <meta
       name="viewport"
@@ -11,13 +11,13 @@
     <title>Contacts — Your address book, in the cloud</title>
     <meta
       name="description"
-      content="A clean, fast, private address book that lives in your cloud. Store contacts, search instantly, and sync across every device. Free, no ads, powered by Puter."
+      content="A clean, fast, private address book that lives in your cloud. Store contacts, search instantly, and sync across every device. Free, no ads, powered by Everything Hub."
     />
     <meta
       name="keywords"
       content="contacts, address book, contact manager, online contacts, cloud contacts, vcard, private contacts, free contacts app"
     />
-    <meta name="author" content="Puter" />
+    <meta name="author" content="Everything Hub" />
     <meta name="application-name" content="Contacts" />
     <meta name="robots" content="index, follow, max-image-preview:large" />
     <link rel="canonical" href="#" />
@@ -44,7 +44,7 @@
     <meta property="og:title" content="Contacts — Your address book, in the cloud" />
     <meta
       property="og:description"
-      content="A clean, fast, private address book that lives in your cloud. Store contacts, search instantly, and sync across every device. Free, no ads, powered by Puter."
+      content="A clean, fast, private address book that lives in your cloud. Store contacts, search instantly, and sync across every device. Free, no ads, powered by Everything Hub."
     />
     <meta property="og:url" content="" />
     <meta property="og:image" content="" />
@@ -58,7 +58,7 @@
     <meta name="twitter:title" content="Contacts — Your address book, in the cloud" />
     <meta
       name="twitter:description"
-      content="A clean, fast, private address book that lives in your cloud. Free, no ads, powered by Puter."
+      content="A clean, fast, private address book that lives in your cloud. Free, no ads, powered by Everything Hub."
     />
     <meta name="twitter:image" content="" />
     <meta name="twitter:image:alt" content="Contacts — a clean, private address book in the cloud." />
@@ -69,14 +69,14 @@
         "@context": "https://schema.org",
         "@type": "WebApplication",
         "name": "Contacts",
-        "url": "https://contacts-puter-com.invalid/",
+        "url": "#",
         "description": "A clean, fast, private address book that lives in your cloud. Store contacts, search instantly, and sync across every device.",
         "applicationCategory": "BusinessApplication",
         "operatingSystem": "Any (web-based)",
         "browserRequirements": "Requires JavaScript and a modern web browser.",
         "isAccessibleForFree": true,
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-        "creator": { "@type": "Organization", "name": "Puter", "url": "https://puter-com.invalid/" }
+        "creator": { "@type": "Organization", "name": "Everything Hub", "url": "#" }
       }
     </script>
 
@@ -100,10 +100,10 @@
       })();
     </script>
 
-    <!-- Puter.js: the only cloud/AI backend this app uses. -->
+    <!-- Everything Hub: the only cloud/AI backend this app uses. -->
 
-    <!-- When another Puter app launches Contacts as its headless contacts API
-         (see src/api/protocol.js) there is nothing to show. The Puter desktop
+    <!-- When another Everything Hub app launches Contacts as its headless contacts API
+         (see src/api/protocol.js) there is nothing to show. The Everything Hub desktop
          creates and shows an app's window before the app itself loads, so hide
          it here — the earliest moment the SDK exists — rather than waiting for
          the app bundle, which would flash an empty window on screen. main.js
@@ -111,11 +111,11 @@
     <script>
       (function () {
         try {
-          var raw = new URLSearchParams(location.search).get('puter.args') || ''
+          var raw = new URLSearchParams(location.search).get('ehub.args') || ''
           // Keep in step with SERVICE_ARGS in src/api/protocol.js.
           if (!/"service"\s*:\s*"(contacts-api|mcp)"/.test(raw)) return
-          if (window.puter && puter.ui && typeof puter.ui.hideWindow === 'function') {
-            puter.ui.hideWindow()
+          if (window.ehub && ehub.ui && typeof ehub.ui.hideWindow === 'function') {
+            ehub.ui.hideWindow()
           }
         } catch (_e) {
           /* main.js will hide the window a moment later */

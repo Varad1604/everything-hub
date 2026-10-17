@@ -25299,7 +25299,7 @@ pu2se
 pus2h
 pu3she
 pus3t
-puter5s
+ehub5s
 3puts
 put6schm
 put6schn

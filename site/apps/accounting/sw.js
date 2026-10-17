@@ -1,7 +1,7 @@
 /* Generated at build time by vite.config.js. Do not edit. */
 const CACHE = 'bookkeeping-v10gsc1z-nolocal2';
 const SHELL = ["./","./index.html","./manifest.json","./favicon.ico","./favicon-16x16.png","./favicon-32x32.png","./favicon-48x48.png","./apple-touch-icon.png","./icon-192.png","./icon-512.png","./icon-maskable-512.png","./app-icon.png","./assets/index-Y31yui-2.js","./assets/account-BZRqj6h9.js","./assets/accounts-Jsww0oT5.js","./assets/banking-DZpOKjGF.js","./assets/combobox-DRopRPqu.js","./assets/common-BE-mSAEt.js","./assets/contact-Caexpz1S.js","./assets/contacts-BRlFSQM0.js","./assets/csv-CdlU-kBY.js","./assets/dialog-C__E7-wU.js","./assets/forms-D1b3ed0j.js","./assets/importer-Dvxg3MUc.js","./assets/item-Dh8RnDYA.js","./assets/items-DMk7oJWl.js","./assets/misc-Oebi6mAp.js","./assets/reconcile-BPXSm2kj.js","./assets/reports-QAlECIjq.js","./assets/rules-Bu-ISt4a.js","./assets/sales-BFoVVaYf.js","./assets/settings-CP85JtO7.js","./assets/store-DkcStMoS.js","./assets/table-0MbGmkHY.js","./assets/txnlist-ZPA3Q0A-.js","./assets/index-YHz5iddG.css"];
-const SDK = 'https://js-puter-com.invalid/';
+const SDK = 'https://sdk.everything-hub.invalid/';
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
@@ -55,5 +55,5 @@ self.addEventListener('fetch', (event) => {
       return response;
     })());
   }
-  /* Calls to the user's Puter cloud always go to the network. */
+  /* Calls to the user's Everything Hub storage always go to the network. */
 });

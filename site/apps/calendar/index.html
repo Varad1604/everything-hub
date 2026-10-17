@@ -1,16 +1,16 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <script src="../../puter-local.js"></script>
+    <script src="../../everything-core.js"></script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 
-    <!-- Booking links read `calendar.puter.com/#/<host>/<page>` (see linkFor in
+    <!-- Booking links read `calendar.ehub.com/#/<host>/<page>` (see linkFor in
          src/js/booking.js). They land on the app shell but belong to the guest
          booking page, public/book.html — no sign-in, no SDK, none of the app —
          so hand them over here, before anything else loads; `replace`, so Back
          never returns to a page that only ever forwarded. The grammar is
-         exact: the label of a `cal-<host>.puter.work` worker and a page slug —
+         exact: the label of a `cal-<host>.ehub.work` worker and a page slug —
          lowercase letters, digits, hyphens, nothing else — so this can only
          ever forward to the sibling booking page, never anywhere a crafted
          link might point. Lowercased first: these links get read out and
@@ -49,9 +49,9 @@
     />
     <meta
       name="keywords"
-      content="calendar, web calendar, calendar app, scheduling, events, recurring events, reminders, agenda, ical, ics, puter"
+      content="calendar, web calendar, calendar app, scheduling, events, recurring events, reminders, agenda, ical, ics, ehub"
     />
-    <meta name="author" content="Puter" />
+    <meta name="author" content="Everything Hub" />
     <meta name="robots" content="index, follow" />
     <link rel="canonical" href="#" />
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
@@ -118,9 +118,9 @@
     <meta name="twitter:image" content="" />
     <meta name="twitter:image:alt" content="The Calendar app showing a colorful month view." />
 
-    <!-- Puter.js: the only backend dependency (auth, key-value storage, context menu). -->
-    <!-- When another Puter app launches the calendar as its headless API (see
-         src/js/api/protocol.js) there is nothing to show. The Puter desktop
+    <!-- Everything Hub: the only backend dependency (auth, key-value storage, context menu). -->
+    <!-- When another Everything Hub app launches the calendar as its headless API (see
+         src/js/api/protocol.js) there is nothing to show. The Everything Hub desktop
          creates and shows an app's window before the app itself loads, so hide
          it here — the earliest moment the SDK exists — rather than waiting for
          the app bundle, which would flash an empty window on screen. main.js
@@ -128,11 +128,11 @@
     <script>
       (function () {
         try {
-          var raw = new URLSearchParams(location.search).get('puter.args') || '';
+          var raw = new URLSearchParams(location.search).get('ehub.args') || '';
           // Keep in step with SERVICE_ARGS in src/js/api/protocol.js.
           if (!/"service"\s*:\s*"calendar-api"/.test(raw)) return;
-          if (window.puter && puter.ui && typeof puter.ui.hideWindow === 'function') {
-            puter.ui.hideWindow();
+          if (window.ehub && ehub.ui && typeof ehub.ui.hideWindow === 'function') {
+            ehub.ui.hideWindow();
           }
         } catch (_e) {
           /* main.js will hide the window a moment later */

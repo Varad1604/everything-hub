@@ -6,15 +6,15 @@
  * Strategy: precache the app shell at install; serve navigations from the
  * cached shell (hash-routing means every route is index.html); cache-first
  * for same-origin static assets (they carry content hashes); and
- * stale-while-revalidate for the Puter SDK script so the app can boot
- * offline. Everything else — Puter API calls, share snapshot fetches —
+ * stale-while-revalidate for the Everything Hub SDK script so the app can boot
+ * offline. Everything else — Everything Hub API calls, share snapshot fetches —
  * goes straight to the network.
  */
 
 const VERSION = '62e29e418788-nolocal2';
 const ASSETS = ["./","./assets/icon-192-CUI2TLCO.png","./assets/index-Dh8JAiwj.js","./assets/index-ON8P9Sd2.css","./favicon.ico","./icons/apple-touch-icon.png","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-maskable-512.png","./manifest.webmanifest"];
 const CACHE = `tasks-${VERSION}`;
-const SDK_HOST = 'js.puter.com';
+const SDK_HOST = 'js.ehub.com';
 /* The SDK lives outside the versioned cache: it isn't part of a deploy,
    and keeping it in `CACHE` meant every update's activate step deleted
    the only copy — an update followed by an offline launch then booted
@@ -85,7 +85,7 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  // The Puter SDK: serve the cached copy immediately; re-fetch it in the
+  // The Everything Hub SDK: serve the cached copy immediately; re-fetch it in the
   // background only once the copy is older than SDK_TTL. With nothing
   // cached yet, even an unverifiable opaque copy beats no SDK at all.
   if (url.hostname === SDK_HOST) {

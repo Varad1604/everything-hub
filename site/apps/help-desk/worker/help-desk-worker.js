@@ -36,7 +36,7 @@
 	* a prefix listing reads exactly one collection:
 	*
 	*   meta                  desk settings (name, portal, email, owner)
-	*   members               agents by Puter uuid (one small document)
+	*   members               agents by Everything Hub uuid (one small document)
 	*   cfg:<kind>            groups, macros, views, fields, triggers, sla, kb
 	*   seq                   counters: { t: tickets, u: users, o: orgs, a: articles }
 	*   rev                   change counter, bumped on every write
@@ -45,9 +45,9 @@
 	*   e:<id>:<n>            ticket event: comment, note or field change
 	*   u:<id>                customer (end user)
 	*   ue:<email>            customer id by email
-	*   uu:<uuid>             customer id by Puter account
+	*   uu:<uuid>             customer id by Everything Hub account
 	*   rt:<user>:<ticket>    tickets by requester
-	*   ps:<uuid>:<ticket>    tickets a signed-in Puter account sent from the help center
+	*   ps:<uuid>:<ticket>    tickets a signed-in Everything Hub account sent from the help center
 	*   o:<id>                organization
 	*   od:<domain>           organization id by email domain
 	*   k:<id>                knowledge base article (summary, listed)
@@ -111,7 +111,7 @@
 	* The help desk's domain vocabulary, shared by the worker and the app:
 	* ticket statuses, priorities, types, channels and roles, plus the
 	* normalizers that turn untrusted input into well-formed records. Everything
-	* here is pure so it runs the same in a browser, a Puter worker and tests.
+	* here is pure so it runs the same in a browser, an Everything Hub worker and tests.
 	*/
 	var STATUSES = [
 		"new",
@@ -498,7 +498,7 @@
 	//#endregion
 	//#region src/server/http.js
 	/**
-	* A tiny route table that both the Puter worker and the in-browser backend
+	* A tiny route table that both the Everything Hub worker and the in-browser backend
 	* dispatch through. Handlers receive a context and return plain data (sent
 	* as JSON) or a Response; they signal failure by throwing HttpError.
 	*/
@@ -593,7 +593,7 @@
 			status: 402,
 			body: {
 				error: "insufficient_funds",
-				message: "The help desk owner has run out of Puter usage credit."
+				message: "The help desk owner has run out of Everything Hub usage credit."
 			}
 		};
 		return {
@@ -640,9 +640,9 @@
 	//#endregion
 	//#region src/server/store.js
 	/**
-	* Key-value helpers for the backend. They wrap the Puter KV API the backend
-	* is handed (the worker owner's `me.puter.kv`, or the signed-in user's
-	* `puter.kv` when the desk runs in the browser) with the access patterns the
+	* Key-value helpers for the backend. They wrap the Everything Hub KV API the backend
+	* is handed (the worker owner's `me.ehub.kv`, or the signed-in user's
+	* `ehub.kv` when the desk runs in the browser) with the access patterns the
 	* help desk needs: batched reads, paged prefix scans, and the commit that
 	* writes records together with a numbered change feed entry.
 	*/
@@ -1579,7 +1579,7 @@
 			notes: cleanText(input.notes, LIMITS.notes) || "",
 			locale: cleanLine(input.locale, 20) || null,
 			tz: cleanLine(input.tz, 60) || null,
-			puter: null,
+			ehub: null,
 			suspended: false,
 			createdAt: now,
 			updatedAt: now
@@ -1883,7 +1883,7 @@
 			problem: base.problem || null,
 			key: secret(24),
 			updatedBy: actor.id || null,
-			submitterPuter: actor.type === "customer" && /^[\w-]{6,64}$/.test(String(input.submitterPuter || "")) ? input.submitterPuter : null,
+			submitterEhub: actor.type === "customer" && /^[\w-]{6,64}$/.test(String(input.submitterEhub || "")) ? input.submitterEhub : null,
 			unverified: actor.type === "customer" && !!input.unverified
 		};
 		if (actor.type === "agent" && ticket.status === "new" && ticket.assignee) ticket.status = "open";
@@ -1933,8 +1933,8 @@
 				value: e
 			}))
 		];
-		if (ticket.submitterPuter) records.push({
-			key: K.submitterTicket(ticket.submitterPuter, id),
+		if (ticket.submitterEhub) records.push({
+			key: K.submitterTicket(ticket.submitterEhub, id),
 			value: 1
 		});
 		if (ticket.status === "solved") records.push({
@@ -2086,7 +2086,7 @@
 		const newRequester = patch.requester && patch.requester !== before.requester;
 		if (newRequester) {
 			paths.key = secret(24);
-			paths.submitterPuter = null;
+			paths.submitterEhub = null;
 			paths.unverified = false;
 		}
 		const events = [];
@@ -2137,7 +2137,7 @@
 		});
 		if (newRequester) {
 			await store.del(K.requesterTicket(before.requester, id)).catch(() => {});
-			if (before.submitterPuter) await store.del(K.submitterTicket(before.submitterPuter, id)).catch(() => {});
+			if (before.submitterEhub) await store.del(K.submitterTicket(before.submitterEhub, id)).catch(() => {});
 		}
 		if (before.status === "solved" && ticket.status !== "solved") await store.del(K.solved(id)).catch(() => {});
 		let notified = [];
@@ -2242,7 +2242,7 @@
 	//#region src/server/email.js
 	/**
 	* Turning received email into tickets. The owner's browser reads their
-	* Puter mailbox and hands each new message to the import route; this module
+	* Everything Hub mailbox and hands each new message to the import route; this module
 	* decides whether it continues an existing request (the subject carries
 	* the request number, as every notification email does) or starts a new one.
 	*/
@@ -2300,9 +2300,9 @@
 	//#region src/server/backend.js
 	/**
 	* The help desk backend: every route the app and the help center call. It
-	* is written against small injected services (a Puter KV store, a file
+	* is written against small injected services (an Everything Hub KV store, a file
 	* store, an email sender and an identity lookup) so the same code runs in
-	* three places: the Puter worker an owner deploys, the owner's own browser
+	* three places: the Everything Hub worker an owner deploys, the owner's own browser
 	* before any worker exists, and the tests.
 	*/
 	var SWEEP_EVERY = 36e5;
@@ -2334,7 +2334,7 @@
 		const articleCache = /* @__PURE__ */ new Map();
 		async function identity(req) {
 			const who = await req.who?.();
-			if (!who || !who.uuid) fail(401, "unauthorized", "Sign in with Puter to continue");
+			if (!who || !who.uuid) fail(401, "unauthorized", "Sign in with Everything Hub to continue");
 			return who;
 		}
 		function deskId(value) {
@@ -2904,7 +2904,7 @@
 			return { viewers: (await store.page(c.K.presencePrefix(id), { limit: 50 })).items.map((i) => i.value).filter((v) => v && v.uuid !== c.who.uuid && now - v.at < 45e3) };
 		});
 		/**
-		* Received email, read from the owner's Puter mailbox by their browser.
+		* Received email, read from the owner's Everything Hub mailbox by their browser.
 		* A message whose subject carries a request number continues that request
 		* when it comes from its requester or a CC; anything else opens a new one.
 		* Each message is imported once.
@@ -3129,7 +3129,7 @@
 			const user = await store.get(c.K.user(id));
 			if (!user) return { ok: true };
 			if ((await store.page(c.K.requesterPrefix(id), { limit: 1 })).items.length) fail(409, "has_tickets", "This customer has tickets. Delete or reassign them first.");
-			await store.delMany([user.email ? c.K.userByEmail(user.email) : null, user.puter ? c.K.userByUuid(user.puter) : null].filter(Boolean));
+			await store.delMany([user.email ? c.K.userByEmail(user.email) : null, user.ehub ? c.K.userByUuid(user.ehub) : null].filter(Boolean));
 			await store.del(c.K.user(id));
 			await store.commit(c.K, [], {
 				k: "u",
@@ -3533,14 +3533,14 @@
 				}
 			};
 		}
-		/** The requester behind a help center call: a link key or their Puter account. */
+		/** The requester behind a help center call: a link key or their Everything Hub account. */
 		async function requestAccess(req, p, id) {
 			const ticket = await store.get(p.K.ticket(id));
 			if (!ticket || ticket.deleted || ticket.spam) fail(404, "not_found", "We could not find that request");
 			const key = String(req.query?.key || req.body?.key || "");
 			if (key && key.length >= 16 && key === ticket.key) return ticket;
 			const who = await req.who?.().catch(() => null);
-			if (who?.uuid && ticket.submitterPuter && ticket.submitterPuter === who.uuid) return ticket;
+			if (who?.uuid && ticket.submitterEhub && ticket.submitterEhub === who.uuid) return ticket;
 			fail(403, "forbidden", "This link is not valid for that request");
 		}
 		async function publishedArticles(p) {
@@ -3656,7 +3656,7 @@
 				via: "portal",
 				fields,
 				unverified,
-				submitterPuter: who?.uuid || null,
+				submitterEhub: who?.uuid || null,
 				spam: !!requester.suspended
 			}, actor);
 			if (requester.suspended) return {
@@ -3709,7 +3709,7 @@
 					},
 					via: "portal",
 					tags: ["follow_up"],
-					submitterPuter: ticket.submitterPuter,
+					submitterEhub: ticket.submitterEhub,
 					unverified: ticket.unverified
 				}, actor);
 				const original = await writeTicket(store, p.K, id, { followUp: res.ticket.id });
@@ -3771,7 +3771,7 @@
 			const p = await portalContext(req);
 			const who = await identity(req);
 			const ids = (await store.keysUnder(p.K.submitterPrefix(who.uuid), { max: 500 })).map(idFromKey).filter(Boolean);
-			return { requests: (await store.getMany(ids.map((i) => p.K.ticket(i)))).filter((t) => t && !t.deleted && !t.spam && t.submitterPuter === who.uuid).map((t) => ({
+			return { requests: (await store.getMany(ids.map((i) => p.K.ticket(i)))).filter((t) => t && !t.deleted && !t.spam && t.submitterEhub === who.uuid).map((t) => ({
 				...publicTicket(t, p.meta),
 				key: t.key
 			})).sort((a, b) => b.updatedAt - a.updatedAt) };
@@ -3828,13 +3828,13 @@
 	//#endregion
 	//#region worker/index.js
 	/**
-	* Puter worker entry. Each help desk owner deploys this bundle into their own
-	* Puter account (the app does it for them), so the desk's data lives in the
+	* Everything Hub worker entry. Each help desk owner deploys this bundle into their own
+	* Everything Hub account (the app does it for them), so the desk's data lives in the
 	* owner's key-value store and files, and every agent and help center visitor
 	* reaches it through this worker.
 	*
 	* The runtime provides two globals: `router`, to register routes, and `me`,
-	* the owner's Puter context (available inside handlers only).
+	* the owner's Everything Hub context (available inside handlers only).
 	*/
 	var BUILD = {
 		id: "ff9909a42752",
@@ -3849,11 +3849,11 @@
 	function getBackend() {
 		if (backend) return backend;
 		backend = createBackend({
-			kv: me.puter.kv,
-			fs: me.puter.fs,
-			email: (msg) => me.puter.email.sendTransactional(msg),
+			kv: me.ehub.kv,
+			fs: me.ehub.fs,
+			email: (msg) => me.ehub.email.sendTransactional(msg),
 			ownerUuid: () => {
-				ownerPromise ||= me.puter.auth.getUser().then((u) => u?.uuid || null).catch(() => null).then((uuid) => {
+				ownerPromise ||= me.ehub.auth.getUser().then((u) => u?.uuid || null).catch(() => null).then((uuid) => {
 					if (!uuid) ownerPromise = null;
 					return uuid;
 				});
@@ -3864,16 +3864,16 @@
 		});
 		return backend;
 	}
-	/** Who is calling, from the Puter session puter.workers.exec() attaches. */
+	/** Who is calling, from the Everything Hub session ehub.workers.exec() attaches. */
 	async function identify(user) {
-		if (!user || !user.puter) return null;
-		const token = user.puter.authToken;
+		if (!user || !user.ehub) return null;
+		const token = user.ehub.authToken;
 		const key = token ? await sha256(token) : null;
 		const hit = key && identities.get(key);
 		if (hit && hit.until > Date.now()) return hit.who;
 		let info = null;
 		try {
-			info = await user.puter.auth.getUser();
+			info = await user.ehub.auth.getUser();
 		} catch {
 			return null;
 		}
@@ -3927,9 +3927,9 @@
 			let body = null;
 			let raw = null;
 			if (method === "POST" && /\/files$/.test(url.pathname)) {
-				if (!user || !user.puter) return json(401, {
+				if (!user || !user.ehub) return json(401, {
 					error: "unauthorized",
-					message: "Sign in with Puter to continue"
+					message: "Sign in with Everything Hub to continue"
 				});
 				const bytes = await readBody(request, FILE_LIMIT);
 				if (!bytes) return json(413, {
