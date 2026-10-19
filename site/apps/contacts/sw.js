@@ -10,7 +10,7 @@
  * on it: navigations and non-hashed assets are network-first, and build assets
  * under /assets/ are content-hashed, so a new deploy is picked up either way.)
  */
-const VERSION = 'v2-nolocal2'
+const VERSION = 'v2'
 const CACHE = `contacts-shell-${VERSION}`
 
 // The navigation shell + static brand assets. Hashed JS/CSS aren't listed here

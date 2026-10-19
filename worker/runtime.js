@@ -14,11 +14,68 @@ function parseToken(t) {
   } catch {}
   return null;
 }
+// Unverified parse (used only where a signature has already been checked, or for display).
 export function identityFromHeaders(h) {
-  const o = parseToken(h.get('x-ehub-auth')) || parseToken(h.get('ehub-auth')) || parseToken((h.get('authorization') || '').replace(/^Bearer\s+/i, ''));
+  const o = tokenFromHeaders(h);
+  return o ? toIdentity(o) : null;
+}
+function tokenFromHeaders(h) {
+  return parseToken(h.get('x-ehub-auth')) || parseToken(h.get('ehub-auth')) || parseToken((h.get('authorization') || '').replace(/^Bearer\s+/i, ''));
+}
+function toIdentity(o, verified) {
+  const uuid = o.uu.toLowerCase();
+  return { uuid, username: 'user-' + uuid.slice(0, 8), displayName: typeof o.n === 'string' ? o.n.slice(0, 80) : '', verified: !!verified };
+}
+
+/* ---------------------------------------------------------- signed identities
+ * The engine mints its own random uuid per browser. To stop anyone from presenting someone else's uuid,
+ * the first time a browser shows up it claims its uuid (POST /api/session) and gets back an HMAC signature
+ * that it carries in every token (field "s"). Once a uuid is claimed, only tokens with a valid signature
+ * are accepted for it. Unclaimed (legacy) uuids keep working until their browser claims them.
+ * The HMAC key is env.AUTH_SECRET when set, otherwise a random key kept in a system Durable Object. */
+let keyPromise = null;
+const claimCache = new Map(); // uuid -> { claimed, at }
+export function sysStub(env, name) { return env.APP_SERVER.get(env.APP_SERVER.idFromName('sys|' + name)); }
+export async function sysCall(env, name, op, body) {
+  const r = await sysStub(env, name).fetch('https://sys.internal/' + op, { method: 'POST', headers: { 'x-ehub-sys': op, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+async function hmacKey(env) {
+  if (!keyPromise) {
+    keyPromise = (async () => {
+      let raw = env.AUTH_SECRET ? new TextEncoder().encode(String(env.AUTH_SECRET)) : null;
+      if (!raw) { const j = await sysCall(env, 'auth', 'key'); raw = Uint8Array.from(atob(j.key), (c) => c.charCodeAt(0)); }
+      return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+    })().catch((e) => { keyPromise = null; throw e; });
+  }
+  return keyPromise;
+}
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+export async function signUuid(env, uuid) {
+  const sig = await crypto.subtle.sign('HMAC', await hmacKey(env), new TextEncoder().encode('ehub-id:' + String(uuid).toLowerCase()));
+  return b64u(sig).slice(0, 32);
+}
+function sameStr(a, b) { if (a.length !== b.length) return false; let x = 0; for (let i = 0; i < a.length; i++) x |= a.charCodeAt(i) ^ b.charCodeAt(i); return x === 0; }
+export async function isClaimed(env, uuid) {
+  const c = claimCache.get(uuid);
+  if (c && (c.claimed || Date.now() - c.at < 30000)) return c.claimed;
+  const j = await sysCall(env, 'auth', 'claimed', { uuid });
+  claimCache.set(uuid, { claimed: !!j.claimed, at: Date.now() });
+  if (claimCache.size > 5000) claimCache.clear();
+  return !!j.claimed;
+}
+export function markClaimed(uuid) { claimCache.set(uuid, { claimed: true, at: Date.now() }); }
+// Verified identity for a request, or null. A token with a bad signature is rejected outright.
+export async function verifiedIdentity(env, h) {
+  const o = tokenFromHeaders(h);
   if (!o) return null;
   const uuid = o.uu.toLowerCase();
-  return { uuid, username: 'user-' + uuid.slice(0, 8), displayName: typeof o.n === 'string' ? o.n.slice(0, 80) : '' };
+  if (typeof o.s === 'string' && o.s) {
+    try { if (sameStr(o.s, await signUuid(env, uuid))) return toIdentity(o, true); } catch (e) { return null; }
+    return null;
+  }
+  try { if (await isClaimed(env, uuid)) return null; } catch (e) { /* auth store unreachable: fall back to legacy */ }
+  return toIdentity(o, false);
 }
 
 /* -------------------------------------------------------------------- router */
@@ -73,12 +130,40 @@ function toResponse(out) {
 /* ------------------------------------------------------------------------ kv */
 const clone = (v) => (v === undefined ? null : JSON.parse(JSON.stringify(v)));
 const nowSec = () => Math.floor(Date.now() / 1000);
+// Paths accept dot and bracket notation like the client SDK: a.b, a[0], ["key.with.dots"].
+export function pathParts(path) {
+  if (Array.isArray(path)) return path.map(String);
+  const s = String(path), out = []; let i = 0, cur = '';
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '.') { if (cur) out.push(cur); cur = ''; i++; continue; }
+    if (c === '[') {
+      if (cur) { out.push(cur); cur = ''; }
+      const q = s[i + 1];
+      if (q === '"' || q === "'") {
+        let j = i + 2, buf = '';
+        while (j < s.length && s[j] !== q) { if (s[j] === '\\' && j + 1 < s.length) { buf += s[j + 1]; j += 2; continue; } buf += s[j]; j++; }
+        out.push(buf); i = s.indexOf(']', j); i = i < 0 ? s.length : i + 1; continue;
+      }
+      const e = s.indexOf(']', i); if (e < 0) { cur += s.slice(i); break; }
+      out.push(s.slice(i + 1, e).trim()); i = e + 1; continue;
+    }
+    cur += c; i++;
+  }
+  if (cur) out.push(cur);
+  return out.length ? out : [s];
+}
 function setPath(obj, path, value) {
-  const parts = String(path).split('.'); let o = obj;
-  for (let i = 0; i < parts.length - 1; i++) { if (o[parts[i]] == null || typeof o[parts[i]] !== 'object') o[parts[i]] = {}; o = o[parts[i]]; }
+  const parts = pathParts(path); let o = obj;
+  for (let i = 0; i < parts.length - 1; i++) { if (o[parts[i]] == null || typeof o[parts[i]] !== 'object') o[parts[i]] = /^\d+$/.test(parts[i + 1]) ? [] : {}; o = o[parts[i]]; }
   o[parts[parts.length - 1]] = value;
 }
-const getPath = (obj, path) => String(path).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+const getPath = (obj, path) => pathParts(path).reduce((o, k) => (o == null ? undefined : o[k]), obj);
+function delPath(obj, path) {
+  const parts = pathParts(path), last = parts.pop(), o = parts.length ? getPath(obj, parts) : obj;
+  if (o && typeof o === 'object') { if (Array.isArray(o) && /^\d+$/.test(last)) o.splice(Number(last), 1); else delete o[last]; }
+}
+const ENC = new TextEncoder();
 function globToRe(pattern) {
   return new RegExp('^' + String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 's');
 }
@@ -97,8 +182,8 @@ export function makeKV(storage, ns) {
     if (typeof key !== 'string' || !key.length) throw Object.assign(new Error('A key is required'), { status: 400 });
     if (key.length > 1024) throw Object.assign(new Error('Key is too long'), { status: 400 });
     const rec = { v: clone(value) }; if (e) rec.e = e;
-    const size = JSON.stringify(rec).length;
-    if (size > 1900000) throw Object.assign(new Error('Value is too large'), { status: 413 });
+    const size = ENC.encode(JSON.stringify(rec)).length; // Durable Object values are capped at 2 MB
+    if (size > 1900000) throw Object.assign(new Error('Value is too large (max about 1.9 MB)'), { status: 413, code: 'value_too_large' });
     await storage.put(P + key, rec);
     return true;
   }
@@ -114,7 +199,7 @@ export function makeKV(storage, ns) {
       if (key && typeof key === 'object') return kv.set(key.key, key.value, key.expireAt);
       return save(String(key), value, expOf(opt));
     },
-    async del(...keys) { for (const k of keys.flat()) await storage.delete(P + String(k)); return true; },
+    async del(...keys) { const ks = keys.flat().map((k) => P + String(k)); for (let i = 0; i < ks.length; i += 128) await storage.delete(ks.slice(i, i + 128)); return true; },
     incr(key, amount) {
       return serial(async () => {
         const rec = await load(key);
@@ -147,11 +232,7 @@ export function makeKV(storage, ns) {
     remove(key, ...paths) {
       return serial(async () => {
         const rec = await load(key); if (!rec || !rec.v || typeof rec.v !== 'object') return null;
-        for (const p of paths.flat()) {
-          const parts = String(p).split('.'), last = parts.pop();
-          const o = parts.length ? getPath(rec.v, parts.join('.')) : rec.v;
-          if (o && typeof o === 'object') delete o[last];
-        }
+        for (const p of paths.flat()) if (p != null) delPath(rec.v, p);
         await save(key, rec.v, rec.e); return clone(rec.v);
       });
     },
@@ -172,26 +253,40 @@ export function makeKV(storage, ns) {
       else if (a && typeof a === 'object') opts = a;
       const pattern = opts.pattern || '*';
       const lit = pattern.split(/[*?]/)[0];
-      const re = globToRe(pattern);
-      const map = await storage.list({ prefix: P + lit });
-      const live = [];
+      const re = globToRe(/[*?]/.test(pattern) ? pattern : pattern + '*');
       const now = Date.now();
-      for (const [k, rec] of map) {
-        const key = k.slice(P.length);
-        if (!re.test(key)) continue;
-        if (rec && rec.e && rec.e * 1000 <= now) continue;
-        live.push({ key, rec });
-      }
-      if (opts.reverse) live.reverse();
       const paged = opts.limit !== undefined || opts.cursor !== undefined;
-      const start = opts.cursor ? Number(opts.cursor) || 0 : opts.offset || 0;
-      const lim = Math.min(opts.limit || 1000, 1000);
-      const slice = paged ? live.slice(start, start + lim) : live;
-      const items = slice.map((x) => (opts.returnValues ? { key: x.key, value: clone(x.rec.v) } : x.key));
+      const lim = Math.max(1, Math.min(Number(opts.limit) || 1000, 1000));
+      const reverse = !!opts.reverse;
+      // Cursor = the last storage key returned ("k:" form); legacy numeric cursors are offsets.
+      let after = null, skip = 0;
+      if (opts.cursor) { const c = String(opts.cursor); if (c.startsWith('k:')) after = P + c.slice(2); else skip = Number(c) || 0; }
+      else if (opts.offset) skip = Number(opts.offset) || 0;
+      const live = [];
+      let lastKey = null, more = false;
+      for (;;) {
+        const q = { prefix: P + lit, limit: 1000, reverse };
+        if (after) { if (reverse) q.end = after; else q.startAfter = after; }
+        const map = await storage.list(q);
+        if (!map.size) break;
+        for (const [k, rec] of map) {
+          after = k;
+          const key = k.slice(P.length);
+          if (!re.test(key) || (rec && rec.e && rec.e * 1000 <= now)) continue;
+          if (skip) { skip--; continue; }
+          if (paged && live.length >= lim) { more = true; break; }
+          live.push({ key, rec }); lastKey = k;
+        }
+        if (more || map.size < 1000) break;
+      }
+      const items = live.map((x) => (opts.returnValues ? { key: x.key, value: clone(x.rec.v) } : x.key));
       if (!paged) return items;
-      return { items, cursor: start + lim < live.length ? String(start + lim) : undefined };
+      return { items, cursor: more && lastKey ? 'k:' + lastKey.slice(P.length) : undefined };
     },
-    async flush() { const map = await storage.list({ prefix: P }); for (const k of map.keys()) await storage.delete(k); return true; },
+    async flush() {
+      for (;;) { const map = await storage.list({ prefix: P, limit: 1000 }); if (!map.size) break; const ks = [...map.keys()]; for (let i = 0; i < ks.length; i += 128) await storage.delete(ks.slice(i, i + 128)); }
+      return true;
+    },
   };
   kv.clear = kv.flush;
   return kv;
@@ -202,7 +297,7 @@ const CHUNK = 1000 * 1024;
 const MAX_FILE = 64 * 1024 * 1024;
 function mimeOf(name) {
   const ext = (/\.([a-z0-9]+)$/i.exec(name) || [])[1] || '';
-  return ({ json: 'application/json', txt: 'text/plain', html: 'text/html', js: 'text/javascript', css: 'text/css', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav' })[ext.toLowerCase()] || 'application/octet-stream';
+  return ({ json: 'application/json', txt: 'text/plain', html: 'text/html', js: 'text/javascript', css: 'text/css', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', ics: 'text/calendar; charset=utf-8', xml: 'application/xml', rss: 'application/rss+xml', atom: 'application/atom+xml', csv: 'text/csv; charset=utf-8', md: 'text/markdown; charset=utf-8', ico: 'image/x-icon', mjs: 'text/javascript', woff2: 'font/woff2', woff: 'font/woff', avif: 'image/avif', vcf: 'text/vcard', zip: 'application/zip', htm: 'text/html' })[ext.toLowerCase()] || 'application/octet-stream';
 }
 async function toBytes(data) {
   if (data == null) return new Uint8Array(0);
@@ -239,6 +334,7 @@ export function makeFS(storage, ns, who, home, urlFor) {
     async write(path, data, opts = {}) {
       if (path && typeof path === 'object' && !(typeof path === 'string')) { opts = data || {}; data = path.data; path = path.path; }
       let p = norm(path);
+      if (p.length > 1500) throw Object.assign(new Error('That path is too long.'), { status: 400, code: 'path_too_long' });
       const prev = await meta(p);
       if (prev && !opts.overwrite) {
         if (opts.dedupeName === false) throw Object.assign(new Error('An entry already exists at ' + p), { code: 'item_with_same_name_exists', status: 409 });
@@ -306,6 +402,11 @@ export function makeFS(storage, ns, who, home, urlFor) {
       const secs = typeof ttl === 'number' ? ttl : /^(\d+)h$/.test(String(ttl)) ? Number(RegExp.$1) * 3600 : /^(\d+)m$/.test(String(ttl)) ? Number(RegExp.$1) * 60 : 86400;
       const id = crypto.randomUUID().replace(/-/g, '');
       await storage.put('sys:url:' + id, { ns, path: p, exp: Date.now() + Math.min(secs, 7 * 86400) * 1000 });
+      if (Math.random() < 0.05) { // sweep expired links now and then so they don't pile up
+        const old = await storage.list({ prefix: 'sys:url:', limit: 500 }); const dead = [];
+        for (const [k, v] of old) if (!v || v.exp < Date.now()) dead.push(k);
+        for (let i = 0; i < dead.length; i += 128) await storage.delete(dead.slice(i, i + 128));
+      }
       return urlFor(id);
     },
     async revokeReadURL(url) { const id = String(url).split('/__file/')[1]; if (id) await storage.delete('sys:url:' + id.split('?')[0]); return true; },

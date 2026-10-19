@@ -97,7 +97,14 @@
   const altLine = (app) => (app.alternativeTo ? `Instead of ${app.alternativeTo}` : app.description || '');
 
   /* ------------------------------------------------------------ usage */
+  // Ask once for persistent storage so the browser doesn't evict app data under storage pressure.
+  let persistAsked = false;
+  function askPersist() {
+    if (persistAsked || !navigator.storage?.persist) return; persistAsked = true;
+    navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {});
+  }
   function recordOpen(id) {
+    askPersist();
     const d = today();
     state.days[d] = Array.from(new Set([...(state.days[d] || []), id]));
     const keys = Object.keys(state.days).sort();
@@ -287,12 +294,14 @@
   /* ---------------------------------------------------------- tabs/apps */
   const tabs = []; // { id, iframe|pane, title, loading, closeHandler }
   let activeId = null;
-  let pendingFrom = null, pendingItems = null;
+  let pendingFrom = null, pendingItems = null, pendingArgs = null;
 
-  function appURL(id, items) {
+  function appURL(id, items, args) {
     let u = `apps/${encodeURIComponent(id)}/index.html`;
-    if (items && items.length) u += `?everything-items=${encodeURIComponent(JSON.stringify(items))}`;
-    return u;
+    const q = [];
+    if (items && items.length) q.push(`everything-items=${encodeURIComponent(JSON.stringify(items))}`);
+    if (args && Object.keys(args).length) q.push(`everything-args=${encodeURIComponent(JSON.stringify(args))}`);
+    return q.length ? `${u}?${q.join('&')}` : u;
   }
   async function checkBuilt(id) {
     if (built.has(id) && built.get(id) !== 'unknown') return built.get(id);
@@ -303,7 +312,7 @@
     return built.get(id);
   }
 
-  function makeTab(id, items) {
+  function makeTab(id, items, args) {
     const app = byId.get(id);
     const tab = { id, title: app.name, loading: true, closeHandler: false, el: null };
     const frames = $('#frames');
@@ -313,7 +322,7 @@
         h('p', { html: `This hub looks for <code>apps/${esc(id)}/index.html</code>. Build ${esc(app.name)} into that folder and it will open right here — no reload of the hub needed.` }),
         h('div', { class: 'row', style: 'justify-content:center' }, h('button', { class: 'btn primary', onclick: () => go('#/') }, 'Back home'), h('button', { class: 'btn', onclick: async () => { built.delete(id); if ((await checkBuilt(id)) !== 'missing') { closeTab(id, true); navigate(id); } else toast('Still not there. Build it, then try again.'); } }, 'Check again'))));
     } else {
-      const f = h('iframe', { class: 'frame', title: app.name, src: appURL(id, items), allow: 'clipboard-read; clipboard-write; fullscreen; camera; microphone; display-capture; autoplay; web-share; geolocation; midi', allowfullscreen: true });
+      const f = h('iframe', { class: 'frame', title: app.name, src: appURL(id, items, args), allow: 'clipboard-read; clipboard-write; fullscreen; camera; microphone; display-capture; autoplay; web-share; geolocation; midi', allowfullscreen: true });
       f.addEventListener('load', () => { tab.loading = false; renderTabs(); tab.onload?.(); warm(id); });
       tab.el = f;
     }
@@ -356,11 +365,12 @@
     if (!app) { toast('That app isn’t in this hub.'); go('#/', true); return; }
     const from = pendingFrom; pendingFrom = null;
     const items = pendingItems; pendingItems = null;
+    const args = pendingArgs; pendingArgs = null;
     let tab = tabs.find((t) => t.id === id);
     const wasHome = !document.body.classList.contains('in-app');
     if (!tab) {
       await checkBuilt(id);
-      tab = makeTab(id, items);
+      tab = makeTab(id, items, args);
       recordOpen(id);
     } else {
       if (items) postTo(tab, { type: 'items', items });
@@ -398,9 +408,10 @@
     if (replace) history.replaceState(null, '', hash); else location.hash = hash;
     if (replace) route();
   }
-  function navigate(id, fromEl, items) {
+  function navigate(id, fromEl, items, args) {
     pendingFrom = fromEl || null;
     pendingItems = items || null;
+    pendingArgs = args || null;
     closeOverlays();
     go(`#/app/${id}`);
   }
@@ -410,10 +421,17 @@
     $('#dockHome').classList.add('on');
     renderHero(); renderRecents();
   }
+  // Deep links: #/app/<id>, optionally ?open=<drive path> (repeatable) to open files in it.
   function route() {
-    const m = /^#\/app\/([^/?#]+)/.exec(location.hash);
-    if (m) showApp(decodeURIComponent(m[1]));
-    else goHome();
+    const m = /^#\/app\/([^/?#]+)(?:\?(.*))?/.exec(location.hash);
+    if (m) {
+      if (m[2] && !pendingItems) {
+        const open = new URLSearchParams(m[2]).getAll('open').filter(Boolean);
+        if (open.length) pendingItems = open;
+        history.replaceState(null, '', `#/app/${m[1]}`);
+      }
+      showApp(decodeURIComponent(m[1]));
+    } else goHome();
   }
 
   function closeTab(id, force) {
@@ -455,7 +473,12 @@
     switch (d.type) {
       case 'launchApp': {
         const app = resolveApp(d.target);
-        if (app) { const items = d.args && Array.isArray(d.args.items) ? d.args.items.map((x) => x.path || x) : null; navigate(app.id, null, items); }
+        if (app) {
+          const a = d.args && typeof d.args === 'object' ? { ...d.args } : {};
+          const items = Array.isArray(a.items) ? a.items.map((x) => x.path || x) : null;
+          delete a.items;
+          navigate(app.id, null, items, Object.keys(a).length ? a : null);
+        }
         else toast(`Couldn’t find an app called “${d.target}”.`);
         break;
       }
@@ -757,65 +780,150 @@
     return v;
   }
   const idbP = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-  async function dumpDB(name) {
-    const db = await idbP(indexedDB.open(name));
-    const out = { name, version: db.version, stores: [] };
-    for (const sn of db.objectStoreNames) {
-      const st = db.transaction(sn).objectStore(sn);
-      const meta = { name: sn, keyPath: st.keyPath, autoIncrement: st.autoIncrement, indexes: [...st.indexNames].map((i) => { const ix = st.index(i); return { name: i, keyPath: ix.keyPath, unique: ix.unique, multiEntry: ix.multiEntry }; }), rows: [] };
-      const rows = await new Promise((res, rej) => { const acc = []; const c = st.openCursor(); c.onsuccess = () => { const cur = c.result; if (cur) { acc.push([cur.primaryKey, cur.value]); cur.continue(); } else res(acc); }; c.onerror = () => rej(c.error); });
-      for (const [k, v] of rows) meta.rows.push({ k: await enc(k), v: await enc(v) });
-      out.stores.push(meta);
-    }
-    db.close();
-    return out;
+  const txP = (tx) => new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('aborted')); });
+  async function dbNames() {
+    let names = ['everything-drive'];
+    try { const dbs = await indexedDB.databases?.(); if (dbs) names = [...new Set(['everything-drive', ...dbs.map((d) => d.name).filter(Boolean)])]; } catch {}
+    return names;
   }
+  // Backup format v2: newline-delimited JSON, written and read a row at a time so big drives don't need one giant string.
+  //   {"format":"everything-backup","version":2,...}  then {"t":"ls",k,v} / {"t":"db",name,version,stores} / {"t":"row",db,s,k?,v} / {"t":"end",rows}
+  async function dumpDB(name, parts, onRow) {
+    const db = await idbP(indexedDB.open(name));
+    try {
+      const metas = [];
+      for (const sn of db.objectStoreNames) {
+        const st = db.transaction(sn).objectStore(sn);
+        metas.push({ name: sn, keyPath: st.keyPath, autoIncrement: st.autoIncrement, indexes: [...st.indexNames].map((i) => { const ix = st.index(i); return { name: i, keyPath: ix.keyPath, unique: ix.unique, multiEntry: ix.multiEntry }; }) });
+      }
+      parts.push(JSON.stringify({ t: 'db', name, version: db.version, stores: metas }) + '\n');
+      for (const m of metas) {
+        const keys = await idbP(db.transaction(m.name).objectStore(m.name).getAllKeys());
+        for (let i = 0; i < keys.length; i += 100) {
+          const chunk = keys.slice(i, i + 100);
+          const tx = db.transaction(m.name); const st = tx.objectStore(m.name);
+          const vals = await Promise.all(chunk.map((k) => idbP(st.get(k))));
+          for (let j = 0; j < chunk.length; j++) {
+            if (vals[j] === undefined) continue;
+            const row = { t: 'row', db: name, s: m.name, v: await enc(vals[j]) };
+            if (m.keyPath == null) row.k = await enc(chunk[j]);
+            parts.push(JSON.stringify(row) + '\n'); onRow();
+          }
+        }
+      }
+    } finally { db.close(); }
+  }
+  let exporting = false;
   async function exportData() {
+    if (exporting) return; exporting = true;
     toast('Gathering your data…');
     try {
-      const ls = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); ls[k] = localStorage.getItem(k); }
-      let names = ['everything-drive'];
-      try { const dbs = await indexedDB.databases?.(); if (dbs) names = dbs.map((d) => d.name).filter(Boolean); } catch {}
-      const dbs = [];
-      for (const n of names) { try { dbs.push(await dumpDB(n)); } catch (e) { console.warn('skip db', n, e); } }
-      const payload = { format: 'everything-backup', version: 1, exportedAt: new Date().toISOString(), origin: location.origin, localStorage: ls, indexedDB: dbs };
-      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      const parts = [JSON.stringify({ format: 'everything-backup', version: 2, exportedAt: new Date().toISOString(), origin: location.origin }) + '\n'];
+      let rows = 0, ndb = 0;
+      for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); parts.push(JSON.stringify({ t: 'ls', k, v: localStorage.getItem(k) }) + '\n'); }
+      for (const n of await dbNames()) { try { await dumpDB(n, parts, () => rows++); ndb++; } catch (e) { console.warn('skip db', n, e); } }
+      parts.push(JSON.stringify({ t: 'end', rows }) + '\n');
+      const blob = new Blob(parts, { type: 'application/x-ndjson' });
       const a = h('a', { href: URL.createObjectURL(blob), download: `everything-backup-${today()}.json` });
-      document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
-      toast(`Backup ready — ${fmtBytes(blob.size)}, ${dbs.length} database${dbs.length === 1 ? '' : 's'}.`);
+      document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 30000);
+      state.lastBackup = Date.now(); save();
+      toast(`Backup ready — ${fmtBytes(blob.size)}, ${ndb} database${ndb === 1 ? '' : 's'}.`);
     } catch (e) { toast(`Export failed: ${e.message || e}`); }
+    finally { exporting = false; }
   }
-  async function restoreDB(d) {
+  async function* lines(file) {
+    const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) yield l; }
+    }
+    if (buf.trim()) yield buf;
+  }
+  async function openFor(d) {
     await new Promise((res) => { const r = indexedDB.deleteDatabase(d.name); r.onsuccess = r.onerror = r.onblocked = () => res(); });
-    const db = await new Promise((res, rej) => {
+    return new Promise((res, rej) => {
       const r = indexedDB.open(d.name, d.version || 1);
       r.onupgradeneeded = () => {
         const db0 = r.result;
-        d.stores.forEach((s) => { const st = db0.createObjectStore(s.name, { keyPath: s.keyPath ?? undefined, autoIncrement: !!s.autoIncrement }); s.indexes.forEach((ix) => st.createIndex(ix.name, ix.keyPath, { unique: ix.unique, multiEntry: ix.multiEntry })); });
+        d.stores.forEach((st) => { const os = db0.createObjectStore(st.name, { keyPath: st.keyPath ?? undefined, autoIncrement: !!st.autoIncrement }); (st.indexes || []).forEach((ix) => os.createIndex(ix.name, ix.keyPath, { unique: ix.unique, multiEntry: ix.multiEntry })); });
       };
       r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+      r.onblocked = () => rej(new Error(`${d.name} is in use — close other Everything tabs and try again`));
     });
-    for (const s of d.stores) {
-      if (!s.rows.length) continue;
-      const tx = db.transaction(s.name, 'readwrite'); const st = tx.objectStore(s.name);
-      s.rows.forEach((row) => { const v = dec(row.v); if (s.keyPath != null) st.put(v); else st.put(v, dec(row.k)); });
-      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+  }
+  async function wipeStores() {
+    for (const n of await dbNames()) await new Promise((r) => { const q = indexedDB.deleteDatabase(n); q.onsuccess = q.onerror = q.onblocked = () => r(); });
+    try { localStorage.clear(); } catch {}
+  }
+  async function restoreV2(file) {
+    // pass 1: the whole file must parse and end with its "end" record before anything is replaced
+    let first = true, rows = 0, ended = false;
+    for await (const l of lines(file)) {
+      const o = JSON.parse(l);
+      if (first) { if (o.format !== 'everything-backup' || o.version !== 2) throw new Error('not a backup'); first = false; continue; }
+      if (o.t === 'row') rows++; else if (o.t === 'end') ended = o.rows === rows;
     }
-    db.close();
+    if (!ended) throw new Error('This backup file is incomplete or damaged.');
+    closeAll();
+    await wipeStores();
+    const dbs = new Map(), meta = new Map(), pending = new Map();
+    const flush = async (key) => {
+      const list = pending.get(key); if (!list || !list.length) return;
+      pending.set(key, []);
+      const [dn, sn] = key.split('\u0000'); const db = dbs.get(dn); const m = meta.get(key);
+      const tx = db.transaction(sn, 'readwrite'); const st = tx.objectStore(sn);
+      list.forEach((row) => { const v = dec(row.v); if (m.keyPath != null) st.put(v); else st.put(v, dec(row.k)); });
+      await txP(tx);
+    };
+    first = true;
+    for await (const l of lines(file)) {
+      if (first) { first = false; continue; }
+      const o = JSON.parse(l);
+      if (o.t === 'ls') { try { localStorage.setItem(o.k, o.v); } catch {} }
+      else if (o.t === 'db') { dbs.set(o.name, await openFor(o)); o.stores.forEach((st) => meta.set(o.name + '\u0000' + st.name, st)); }
+      else if (o.t === 'row') {
+        const key = o.db + '\u0000' + o.s; if (!dbs.has(o.db)) continue;
+        if (!pending.has(key)) pending.set(key, []);
+        pending.get(key).push(o);
+        if (pending.get(key).length >= 200) await flush(key);
+      }
+    }
+    for (const k of pending.keys()) await flush(k);
+    dbs.forEach((db) => db.close());
+  }
+  async function restoreV1(data) {
+    closeAll();
+    await wipeStores();
+    Object.entries(data.localStorage || {}).forEach(([k, v]) => { try { localStorage.setItem(k, v); } catch {} });
+    for (const d of data.indexedDB || []) {
+      const db = await openFor(d);
+      for (const s of d.stores) {
+        if (!s.rows.length) continue;
+        const tx = db.transaction(s.name, 'readwrite'); const st = tx.objectStore(s.name);
+        s.rows.forEach((row) => { const v = dec(row.v); if (s.keyPath != null) st.put(v); else st.put(v, dec(row.k)); });
+        await txP(tx);
+      }
+      db.close();
+    }
   }
   async function importData(file) {
-    let data;
-    try { data = JSON.parse(await file.text()); } catch { toast('That file isn’t an Everything backup.'); return; }
-    if (data.format !== 'everything-backup') { toast('That file isn’t an Everything backup.'); return; }
-    toast('Restoring…');
+    let head = '';
+    try { head = await file.slice(0, 200).text(); } catch {}
+    const v2 = /^\{"format":"everything-backup","version":2/.test(head);
+    const v1 = !v2 && /"format"\s*:\s*"everything-backup"/.test(await file.slice(0, 4096).text().catch(() => ''));
+    if (!v1 && !v2) { toast('That file isn’t an Everything backup.'); return; }
+    if (!confirm('Restore this backup? It replaces all apps’ data in this browser with the backup’s contents.')) return;
+    toast('Restoring…', { timeout: 60000 });
     try {
-      closeAll();
-      localStorage.clear();
-      Object.entries(data.localStorage || {}).forEach(([k, v]) => { try { localStorage.setItem(k, v); } catch {} });
-      for (const d of data.indexedDB || []) await restoreDB(d);
+      if (v2) await restoreV2(file);
+      else { const data = JSON.parse(await file.text()); if (data.format !== 'everything-backup') throw new Error('not a backup'); await restoreV1(data); }
       toast('Restored. Reloading…');
       setTimeout(() => location.replace(location.pathname), 700);
-    } catch (e) { toast(`Import failed: ${e.message || e}`); }
+    } catch (e) { toast(`Import failed: ${e.message || e}`, { timeout: 8000 }); }
   }
   async function wipeAll() {
     closeAll();
@@ -950,7 +1058,16 @@
     Promise.all(APPS.map((a) => checkBuilt(a.id))).then(() => { if ([...built.values()].includes('missing')) renderCats(); });
     if (!state.toured && !/^#\/app\//.test(location.hash)) setTimeout(startTour, 900);
     if ('serviceWorker' in navigator && location.protocol !== 'file:' && !/[?&]nosw\b/.test(location.search)) {
-      const reg = () => navigator.serviceWorker.register('sw.js').catch(() => {});
+      let hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (hadController) toast('Everything Hub was updated. Reload to use the new version — open apps keep running until then.', { action: { label: 'Reload', run: () => location.reload() }, timeout: 20000 });
+        hadController = true;
+      });
+      const reg = () => navigator.serviceWorker.register('sw.js').then((r) => {
+        const check = () => { if (navigator.onLine !== false) r.update().catch(() => {}); };
+        setInterval(check, 60 * 60 * 1000);
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
+      }).catch(() => {});
       if (document.readyState === 'complete') reg(); else window.addEventListener('load', reg, { once: true });
     }
     setInterval(renderHero, 60 * 1000);

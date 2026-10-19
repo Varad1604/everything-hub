@@ -1,4 +1,4 @@
-/* help-desk-worker build=ff9909a42752 at=1792227220786 */
+/* help-desk-worker build=95fbd3deecaf at=1792284672941 */
 (function() {
 	//#region src/shared/ids.js
 	/**
@@ -689,7 +689,7 @@
 		async page(prefix, { limit = 500, cursor, reverse = false } = {}) {
 			checkPrefix(prefix);
 			const opts = {
-				pattern: prefix,
+				pattern: `${prefix}*`,
 				returnValues: true,
 				limit
 			};
@@ -725,7 +725,7 @@
 			let cursor;
 			do {
 				const opts = {
-					pattern: prefix,
+					pattern: `${prefix}*`,
 					limit: 1e3
 				};
 				if (cursor) opts.cursor = cursor;
@@ -3837,8 +3837,8 @@
 	* the owner's Everything Hub context (available inside handlers only).
 	*/
 	var BUILD = {
-		id: "ff9909a42752",
-		at: 1792227220786
+		id: "95fbd3deecaf",
+		at: 1792284672941
 	};
 	var JSON_LIMIT = 2097152;
 	var FILE_LIMIT = 22020096;

@@ -1,7 +1,7 @@
 /* Teamchat service worker. Built into dist/sw.js by vite.config.js, which
    fills in the version and the asset list from the build. */
-const VERSION = "44c864b71a63-nolocal2";
-const ASSETS = ["./assets/index-Bg7I8lgG.js","./assets/emoji-data-CKyw0RC8.js","./assets/highlight-NwUDeNmF.js","./assets/index-D2hy3dSF.css","./","./index.html","./manifest.webmanifest","./favicon.ico","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-maskable-512.png","./icons/apple-touch-icon.png"];
+const VERSION = "69e2066b28cc";
+const ASSETS = ["./assets/index-DgTtbPFM.js","./assets/emoji-data-CKyw0RC8.js","./assets/highlight-B69DZ8tn.js","./assets/index-D2hy3dSF.css","./","./index.html","./manifest.webmanifest","./favicon.ico","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-maskable-512.png","./icons/apple-touch-icon.png"];
 const SHELL = `teamchat-shell-${VERSION}`;
 const EXT = 'teamchat-ext';
 

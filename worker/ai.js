@@ -46,6 +46,7 @@ async function runChat(env, body) {
 
 export async function aiChatCompletions(env, body) {
   const id = 'chatcmpl-' + crypto.randomUUID().slice(0, 12), created = Math.floor(Date.now() / 1000);
+  if (!body || !Array.isArray(body.messages) || !body.messages.length) return json({ error: { message: 'messages must be a non-empty array.' } }, 400);
   const imgs = imagesOf(body.messages);
   if (imgs.length) {
     try {
@@ -71,8 +72,14 @@ export async function aiChatCompletions(env, body) {
           const t = line.trim(); if (!t.startsWith('data:')) continue;
           const d = t.slice(5).trim(); if (d === '[DONE]') continue;
           let j; try { j = JSON.parse(d); } catch { continue; }
+          if (Array.isArray(j.choices)) { // OpenAI-compatible chunk (newer Workers AI models): pass it through
+            const ch = j.choices[0] || {};
+            if (first && ch.delta) { ch.delta = { role: 'assistant', ...ch.delta }; first = false; }
+            c.enqueue(enc.encode('data: ' + JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: ch.delta || {}, finish_reason: ch.finish_reason || null }], ...(j.usage ? { usage: j.usage } : {}) }) + '\n\n'));
+            continue;
+          }
           const delta = {}; if (first) { delta.role = 'assistant'; first = false; }
-          if (j.response) delta.content = j.response;
+          if (typeof j.response === 'string' && j.response) delta.content = j.response;
           if (j.tool_calls) delta.tool_calls = j.tool_calls.map((tc, i) => ({ index: i, id: 'call_' + i, type: 'function', function: { name: tc.name, arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments || {}) } }));
           const o = { id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: null }] };
           if (j.usage) o.usage = j.usage;
@@ -86,8 +93,10 @@ export async function aiChatCompletions(env, body) {
     });
     return new Response(out.pipeThrough(ts), { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' } });
   }
-  const message = { role: 'assistant', content: typeof out.response === 'string' ? out.response : out.response != null ? JSON.stringify(out.response) : '' };
-  if (out.tool_calls && out.tool_calls.length) {
+  const oc = out && Array.isArray(out.choices) && out.choices[0] && out.choices[0].message; // OpenAI-compatible output
+  const message = oc ? { role: 'assistant', content: oc.content || '' } : { role: 'assistant', content: typeof out.response === 'string' ? out.response : out.response != null ? JSON.stringify(out.response) : '' };
+  if (oc && oc.tool_calls && oc.tool_calls.length) message.tool_calls = oc.tool_calls;
+  else if (out.tool_calls && out.tool_calls.length) {
     message.tool_calls = out.tool_calls.map((tc, i) => ({ id: 'call_' + crypto.randomUUID().slice(0, 8), type: 'function', function: { name: tc.name, arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments || {}) } }));
   }
   const reply = { id, object: 'chat.completion', created, model, choices: [{ index: 0, message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }], usage: out.usage };
@@ -130,7 +139,8 @@ export async function aiChatSimple(env, prompt, ...rest) {
   const opts = rest.find((x) => x && typeof x === 'object' && !Array.isArray(x)) || {};
   const messages = Array.isArray(prompt) ? prompt.map((m) => (typeof m === 'string' ? { role: 'user', content: m } : m)) : [{ role: 'user', content: String(prompt) }];
   const { model, out } = await runChat(env, { messages, max_tokens: opts.max_tokens, temperature: opts.temperature, tools: opts.tools });
-  const content = typeof out.response === 'string' ? out.response : JSON.stringify(out.response || '');
+  const oc = out && Array.isArray(out.choices) && out.choices[0] && out.choices[0].message;
+  const content = oc ? String(oc.content || '') : typeof out.response === 'string' ? out.response : JSON.stringify(out.response || '');
   const res = { index: 0, message: { role: 'assistant', content }, finish_reason: 'stop', model };
   res.toString = () => content; res.valueOf = res.toString;
   return res;

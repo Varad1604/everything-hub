@@ -14,7 +14,7 @@
 // v2: the icon set and site.webmanifest were replaced in place, at the same
 // unhashed filenames -- exactly the case where cacheFirst would otherwise
 // keep serving a returning visitor the old artwork forever.
-const CACHE = 'solitaire-v2-nolocal2';
+const CACHE = 'solitaire-v2';
 
 self.addEventListener('install', () => {
   // Don't wait for old tabs to close before this version takes over the

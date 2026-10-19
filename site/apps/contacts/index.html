@@ -23,7 +23,6 @@
     <link rel="canonical" href="#" />
 
     <!-- Performance -->
-
     <!-- Icons & PWA -->
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="icon" type="image/png" sizes="48x48" href="./icon-48.png" />
@@ -101,7 +100,6 @@
     </script>
 
     <!-- Everything Hub: the only cloud/AI backend this app uses. -->
-
     <!-- When another Everything Hub app launches Contacts as its headless contacts API
          (see src/api/protocol.js) there is nothing to show. The Everything Hub desktop
          creates and shows an app's window before the app itself loads, so hide
@@ -124,7 +122,21 @@
     </script>
 
     <!-- Privacy-friendly analytics by Plausible -->
-    <script type="module" crossorigin src="./assets/index-Dd2rnRtT.js"></script>
+    <script async src="https://plausible.io/js/pa-P2qYwxML7xcGJkqsScQMv.js"></script>
+    <script>
+      window.plausible =
+        window.plausible ||
+        function () {
+          (plausible.q = plausible.q || []).push(arguments);
+        };
+      plausible.init =
+        plausible.init ||
+        function (i) {
+          plausible.o = i || {};
+        };
+      plausible.init();
+    </script>
+    <script type="module" crossorigin src="./assets/index-CQYbMPR5.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-MoyOjevI.css">
   </head>
   <body>

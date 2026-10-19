@@ -8,7 +8,7 @@
  * - Cross-origin requests (Everything Hub's API and SDK) and the team server's
  *   source are never touched.
  */
-const CACHE = 'property-management-v1-nolocal2';
+const CACHE = 'property-management-v1';
 const SHELL = ['./', './index.html', './manifest.json', './icons/icon-192.png', './favicon.ico'];
 
 self.addEventListener('install', (event) => {

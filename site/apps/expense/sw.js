@@ -1,5 +1,5 @@
 /* Expenses service worker: app-shell caching. Everything Hub API calls are never cached. */
-const VERSION = 'expenses-v2-nolocal2';
+const VERSION = 'expenses-v2';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png'];

@@ -1,26 +1,78 @@
 // Everything Hub server: static site (./site) + /api/* on the same Cloudflare Worker.
 //   /api/health                      status and which optional features are configured
+//   /api/session                     claim this browser's identity and get its signature (see runtime.js)
 //   /api/ai/...                      OpenAI-compatible chat, images, transcription, speech on Workers AI (binding AI)
 //   /api/fetch                       CORS-free proxy for ehub.net.fetch (target in x-ehub-target)
 //   /api/email/send                  outbound mail through Resend when RESEND_API_KEY is set
 //   /api/peer/<code>                 WebSocket signalling room for ehub.peer (Durable Object PeerRoom)
 //   /api/w/<app>/<instance>/<path>   an app's team server (Durable Object AppServer runs the app's own script)
+//   /api/site/<name>[/f/<path>]      publish a drive folder (ehub.hosting); served publicly at /s/<name>/<path>
 import { DurableObject } from 'cloudflare:workers';
 import { SCRIPTS, BY_APP, FIXED } from './apps/index.js';
 import { aiChatCompletions, aiImages, aiTranscribe, aiSpeech, aiChatSimple } from './ai.js';
 import { sendEmail, emailConfigured } from './email.js';
-import { makeKV, makeFS, identityFromHeaders, json, Router } from './runtime.js';
+import { makeKV, makeFS, identityFromHeaders, verifiedIdentity, signUuid, sysCall, markClaimed, json, Router } from './runtime.js';
 
-const BUILD = '2026-10-17-core';
+const BUILD = '2026-10-18-core';
+
+/* ------------------------------------------------------------------ limits
+ * Soft rate limits that protect the free Workers AI / request quota and the mail key from abuse.
+ * Counted per user, per client IP and (for AI and email) across the whole hub. Override any number with an
+ * env var of the same name, e.g. LIMIT_AI_USER_DAY = "500". */
+const LIMITS = {
+  LIMIT_AI_USER_MIN: 20, LIMIT_AI_USER_DAY: 300, LIMIT_AI_IP_DAY: 1500, LIMIT_AI_GLOBAL_DAY: 4000,
+  LIMIT_IMAGE_USER_DAY: 25, LIMIT_IMAGE_GLOBAL_DAY: 300,
+  LIMIT_FETCH_USER_MIN: 120, LIMIT_FETCH_IP_MIN: 240, LIMIT_FETCH_USER_DAY: 5000,
+  LIMIT_EMAIL_USER_DAY: 30, LIMIT_EMAIL_IP_DAY: 60, LIMIT_EMAIL_GLOBAL_DAY: 300,
+  LIMIT_SESSION_IP_HOUR: 300,
+};
+const lim = (env, k) => { const v = Number(env && env[k]); return Number.isFinite(v) && v > 0 ? v : LIMITS[k]; };
+const clientIP = (request) => request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || 'local';
+function bucketsFor(env, kind, who, ip) {
+  const u = who ? who.uuid : 'anon', B = [];
+  const add = (k, name, win) => B.push({ k: kind + ':' + k, limit: lim(env, name), win });
+  if (kind === 'ai') { add('u:' + u, 'LIMIT_AI_USER_MIN', 60); add('u:' + u, 'LIMIT_AI_USER_DAY', 86400); add('ip:' + ip, 'LIMIT_AI_IP_DAY', 86400); add('all', 'LIMIT_AI_GLOBAL_DAY', 86400); }
+  if (kind === 'image') { add('u:' + u, 'LIMIT_IMAGE_USER_DAY', 86400); add('all', 'LIMIT_IMAGE_GLOBAL_DAY', 86400); }
+  if (kind === 'fetch') { add('u:' + u, 'LIMIT_FETCH_USER_MIN', 60); add('ip:' + ip, 'LIMIT_FETCH_IP_MIN', 60); add('u:' + u, 'LIMIT_FETCH_USER_DAY', 86400); }
+  if (kind === 'email') { add('u:' + u, 'LIMIT_EMAIL_USER_DAY', 86400); add('ip:' + ip, 'LIMIT_EMAIL_IP_DAY', 86400); add('all', 'LIMIT_EMAIL_GLOBAL_DAY', 86400); }
+  if (kind === 'session') add('ip:' + ip, 'LIMIT_SESSION_IP_HOUR', 3600);
+  return B;
+}
+// Returns null when allowed, or a 429 Response.
+export async function rateLimit(env, kind, who, ip) {
+  if (env && env.LIMITS_OFF === '1') return null;
+  let r;
+  try { r = await sysCall(env, 'limits', 'hit', { buckets: bucketsFor(env, kind, who, ip || 'local') }); }
+  catch (e) { return null; } // never fail closed because the counter is unreachable
+  if (r && r.ok === false) {
+    const what = { ai: 'AI', image: 'image generation', fetch: 'web requests', email: 'email', session: 'sign-ins' }[kind] || kind;
+    const msg = /:all$/.test(r.bucket || '') ? `Everything Hub has reached today's ${what} limit. Try again tomorrow.`
+      : `You've reached the ${what} limit for now. Try again in ${fmtWait(r.retryAfter)}.`;
+    return json({ success: false, error: { code: 'rate_limited', message: msg }, message: msg }, 429, { 'retry-after': String(r.retryAfter || 60) });
+  }
+  return null;
+}
+function fmtWait(s) { s = Number(s) || 60; return s < 90 ? s + ' seconds' : s < 5400 ? Math.ceil(s / 60) + ' minutes' : Math.ceil(s / 3600) + ' hours'; }
+async function readJSON(request, maxBytes) {
+  const len = Number(request.headers.get('content-length') || 0);
+  if (len > maxBytes) throw Object.assign(new Error('That request is too large.'), { status: 413 });
+  const text = await request.text();
+  if (text.length > maxBytes) throw Object.assign(new Error('That request is too large.'), { status: 413 });
+  try { return JSON.parse(text || '{}'); } catch { throw Object.assign(new Error('The request body is not valid JSON.'), { status: 400 }); }
+}
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (/^\/s\/[a-z0-9][a-z0-9-]{1,62}(\/|$)/.test(url.pathname) && (request.method === 'GET' || request.method === 'HEAD')) {
+      try { return await serveSite(env, url); } catch (e) { return json({ message: 'Not found' }, 404); }
+    }
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     try {
       return await api(request, env, url);
     } catch (e) {
-      return json({ success: false, error: { code: 'server_error', message: String((e && e.message) || e) } }, 500);
+      const status = e && e.status >= 400 && e.status < 600 ? e.status : 500;
+      return json({ success: false, error: { code: status === 500 ? 'server_error' : 'bad_request', message: String((e && e.message) || e) }, message: String((e && e.message) || e) }, status);
     }
   },
 };
@@ -30,23 +82,39 @@ async function api(request, env, url) {
   if (p === '/api/health' || p === '/api/') {
     return json({ ok: true, name: 'everything-hub', build: BUILD, ai: !!env.AI, email: emailConfigured(env), teamServers: Object.keys(BY_APP).length, sharedServers: Object.keys(FIXED).length, time: new Date().toISOString() });
   }
+  // The /api is for this site's own pages: refuse calls made from other origins (browsers send Origin on those).
+  const origin = request.headers.get('origin');
+  if (origin && origin !== url.origin && origin !== 'null') return json({ success: false, error: { code: 'forbidden', message: 'Cross-site requests are not allowed.' } }, 403);
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { allow: 'GET, POST, PUT, PATCH, DELETE, OPTIONS' } });
+  const ip = clientIP(request);
+  if (p === '/api/session' && request.method === 'POST') return session(request, env, ip);
   if (p.startsWith('/api/ai/')) {
     if (!env.AI) return json({ error: { message: 'AI is not enabled on this server.' } }, 503);
-    if (!identityFromHeaders(request.headers)) return json({ error: { message: 'Open this from an Everything Hub app.' } }, 401);
+    const who = await verifiedIdentity(env, request.headers);
+    if (!who) return json({ error: { message: 'Open this from an Everything Hub app.' } }, 401);
     const tail = p.slice('/api/ai'.length);
-    if (tail === '/chat/completions' && request.method === 'POST') return aiChatCompletions(env, await request.json());
-    if (tail === '/images/generations' && request.method === 'POST') return aiImages(env, await request.json());
-    if (tail === '/audio/transcriptions' && request.method === 'POST') return aiTranscribe(env, await request.formData());
-    if (tail === '/audio/speech' && request.method === 'POST') return aiSpeech(env, await request.json());
     if (tail === '/models') return json({ data: [{ id: 'default', object: 'model', owned_by: 'everything-hub' }] });
-    return json({ error: { message: 'Not found' } }, 404);
+    if (request.method !== 'POST') return json({ error: { message: 'Not found' } }, 404);
+    const known = ['/chat/completions', '/images/generations', '/audio/transcriptions', '/audio/speech'];
+    if (!known.includes(tail)) return json({ error: { message: 'Not found' } }, 404);
+    const limited = await rateLimit(env, tail === '/images/generations' ? 'image' : 'ai', who, ip);
+    if (limited) return limited;
+    if (tail === '/chat/completions') return aiChatCompletions(env, await readJSON(request, 12 * 1024 * 1024));
+    if (tail === '/images/generations') return aiImages(env, await readJSON(request, 64 * 1024));
+    if (tail === '/audio/transcriptions') {
+      if (Number(request.headers.get('content-length') || 0) > 26 * 1024 * 1024) return json({ error: { message: 'Audio is too long.' } }, 413);
+      return aiTranscribe(env, await request.formData());
+    }
+    return aiSpeech(env, await readJSON(request, 64 * 1024));
   }
-  if (p === '/api/fetch') return proxyFetch(request);
+  if (p === '/api/fetch') return proxyFetch(request, env, url, ip);
   if (p === '/api/email/send' && request.method === 'POST') {
-    const who = identityFromHeaders(request.headers);
+    const who = await verifiedIdentity(env, request.headers);
     if (!who) return json({ message: 'Sign-in token missing.' }, 401);
     if (!emailConfigured(env)) return json({ configured: false, message: 'Email sending is not set up on this server.' }, 503);
-    const r = await sendEmail(env, await request.json(), who);
+    const limited = await rateLimit(env, 'email', who, ip);
+    if (limited) return limited;
+    const r = await sendEmail(env, await readJSON(request, 30 * 1024 * 1024), who);
     return json(r, r.delivered && r.delivered.length ? 200 : 502);
   }
   let m = /^\/api\/peer\/([^/]{1,80})$/.exec(p);
@@ -55,6 +123,8 @@ async function api(request, env, url) {
     const id = env.PEER_ROOM.idFromName(decodeURIComponent(m[1]));
     return env.PEER_ROOM.get(id).fetch(request);
   }
+  m = /^\/api\/site\/([a-z0-9][a-z0-9-]{1,62})(?:\/f\/(.+))?$/.exec(p);
+  if (m) return siteAPI(request, env, m[1], m[2] == null ? null : m[2]);
   m = /^\/api\/w\/([a-z0-9-]{1,60})\/([a-z0-9-]{1,63})(\/.*)?$/.exec(p);
   if (m) return routeWorker(env, m[1], m[2], m[3] || '/', url.search, request);
   return json({ message: 'Not found' }, 404);
@@ -71,6 +141,7 @@ export async function routeWorker(env, app, inst, path, search, request) {
   if (!key) return json({ message: 'This app has no team server on Everything Hub.' }, 404);
   const stub = env.APP_SERVER.get(env.APP_SERVER.idFromName(key + '|' + inst));
   const h = new Headers(request.headers);
+  h.delete('x-ehub-sys');
   h.set('x-ehub-key', key); h.set('x-ehub-inst', inst); h.set('x-ehub-app', app); h.set('x-ehub-path', path + (search || ''));
   h.set('x-ehub-origin', new URL(request.url).origin);
   const init = { method: request.method, headers: h, redirect: 'manual' };
@@ -78,15 +149,37 @@ export async function routeWorker(env, app, inst, path, search, request) {
   return stub.fetch('https://app-server.internal/', init);
 }
 
+/* ------------------------------------------------------------------- session */
+// POST /api/session with the browser's current token and {secret}: claims its uuid (first come) and returns the
+// signature the engine adds to its tokens. Re-claiming with the same secret returns the same signature.
+async function session(request, env, ip) {
+  const who = identityFromHeaders(request.headers);
+  if (!who) return json({ message: 'Token missing.' }, 401);
+  const body = await readJSON(request, 4096);
+  const secret = typeof body.secret === 'string' && body.secret.length >= 16 && body.secret.length <= 200 ? body.secret : null;
+  if (!secret) return json({ message: 'A browser secret is required.' }, 400);
+  const limited = await rateLimit(env, 'session', who, ip);
+  if (limited) return limited;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ehub-secret:' + secret));
+  const hash = btoa(String.fromCharCode(...new Uint8Array(digest)));
+  const r = await sysCall(env, 'auth', 'claim', { uuid: who.uuid, hash });
+  if (!r.ok) return json({ success: false, claimed: true, message: 'This identity belongs to another browser.' }, 409);
+  markClaimed(who.uuid);
+  return json({ success: true, uuid: who.uuid, sig: await signUuid(env, who.uuid) });
+}
+
 /* ---------------------------------------------------------------- fetch proxy */
 const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|.*\.invalid|0\.0\.0\.0|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|\[?::1\]?|\[?f[cd][0-9a-f]{2}:.*)$/i;
 const MAX_PROXY_BYTES = 25 * 1024 * 1024;
-async function proxyFetch(request) {
+async function proxyFetch(request, env, self, ip) {
   const target = request.headers.get('x-ehub-target') || new URL(request.url).searchParams.get('url');
   let u;
   try { u = new URL(target); } catch { return json({ message: 'A valid target URL is required.' }, 400); }
-  if (!/^https?:$/.test(u.protocol) || PRIVATE_HOST.test(u.hostname)) return json({ message: 'That address cannot be fetched.' }, 403);
-  if (!identityFromHeaders(request.headers)) return json({ message: 'Sign-in token missing.' }, 401);
+  if (!/^https?:$/.test(u.protocol) || PRIVATE_HOST.test(u.hostname) || u.hostname === self.hostname) return json({ message: 'That address cannot be fetched.' }, 403);
+  const who = await verifiedIdentity(env, request.headers);
+  if (!who) return json({ message: 'Sign-in token missing.' }, 401);
+  const limited = await rateLimit(env, 'fetch', who, ip);
+  if (limited) return limited;
   const h = new Headers();
   for (const [k, v] of request.headers) {
     if (/^(host|cookie|origin|referer|x-ehub-.*|ehub-auth|cf-.*|x-forwarded-.*|x-real-ip|content-length)$/i.test(k)) continue;
@@ -96,6 +189,7 @@ async function proxyFetch(request) {
   if (!['GET', 'HEAD'].includes(request.method)) init.body = request.body;
   let r;
   try { r = await fetch(u.href, init); } catch (e) { return json({ message: 'Could not reach ' + u.hostname + '.' }, 502); }
+  try { if (new URL(r.url).hostname === self.hostname) return json({ message: 'That address cannot be fetched.' }, 403); } catch {}
   const len = Number(r.headers.get('content-length') || 0);
   if (len > MAX_PROXY_BYTES) return json({ message: 'That response is too large to proxy.' }, 413);
   const out = new Headers(r.headers);
@@ -107,6 +201,45 @@ async function proxyFetch(request) {
     body = body.pipeThrough(new TransformStream({ transform(chunk, c) { seen += chunk.byteLength; if (seen > MAX_PROXY_BYTES) c.error(new Error('too large')); else c.enqueue(chunk); } }));
   }
   return new Response(body, { status: r.status, statusText: r.statusText, headers: out });
+}
+
+/* ------------------------------------------------------------ published sites */
+const SITE_MAX_FILE = 10 * 1024 * 1024;
+const siteStub = (env, name) => env.APP_SERVER.get(env.APP_SERVER.idFromName('site|' + name));
+function siteOp(env, name, op, extra = {}, body) {
+  const h = new Headers({ 'x-ehub-site': op, 'x-ehub-site-name': name });
+  for (const [k, v] of Object.entries(extra)) h.set(k, v);
+  return siteStub(env, name).fetch('https://site.internal/', { method: body !== undefined ? 'POST' : 'GET', headers: h, body });
+}
+async function siteAPI(request, env, name, rel) {
+  const who = await verifiedIdentity(env, request.headers);
+  if (!who) return json({ message: 'Sign-in token missing.' }, 401);
+  const dec = (r) => { try { return decodeURIComponent(r); } catch { return r; } };
+  const path = rel == null ? null : rel.split('/').map(dec).join('/');
+  const m = request.method;
+  if (rel == null && m === 'POST') return siteOp(env, name, 'claim', { 'x-ehub-uuid': who.uuid });
+  if (rel == null && m === 'DELETE') return siteOp(env, name, 'drop', { 'x-ehub-uuid': who.uuid });
+  if (path != null && m === 'PUT') {
+    if (Number(request.headers.get('content-length') || 0) > SITE_MAX_FILE) return json({ message: 'Files on a published site can be up to 10 MB.' }, 413);
+    const buf = await request.arrayBuffer();
+    if (buf.byteLength > SITE_MAX_FILE) return json({ message: 'Files on a published site can be up to 10 MB.' }, 413);
+    return siteOp(env, name, 'put', { 'x-ehub-uuid': who.uuid, 'x-ehub-site-path': encodeURIComponent(path), 'x-ehub-site-type': request.headers.get('content-type') || '' }, buf);
+  }
+  if (path != null && m === 'DELETE') return siteOp(env, name, 'del', { 'x-ehub-uuid': who.uuid, 'x-ehub-site-path': encodeURIComponent(path) });
+  return json({ message: 'Not found' }, 404);
+}
+async function serveSite(env, url) {
+  const [, , name, ...rest] = url.pathname.split('/');
+  let path = rest.map((x) => { try { return decodeURIComponent(x); } catch { return x; } }).join('/');
+  if (!rest.length) return Response.redirect(url.origin + '/s/' + name + '/' + url.search, 301);
+  if (path === '' || path.endsWith('/')) path += 'index.html';
+  const r = await siteOp(env, name, 'get', { 'x-ehub-site-path': encodeURIComponent(path) });
+  const h = new Headers(r.headers);
+  // Published pages are other people's content: run them in an opaque origin so they can't touch this hub's data.
+  h.set('content-security-policy', "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals");
+  h.set('x-content-type-options', 'nosniff');
+  h.set('referrer-policy', 'no-referrer');
+  return new Response(r.body, { status: r.status, headers: h });
 }
 
 /* ------------------------------------------------------------ peer signalling */
@@ -170,13 +303,21 @@ export class AppServer extends DurableObject {
       email: {
         send: async (msg) => {
           if (!emailConfigured(env)) { const e = new Error('Email sending is not set up on this Everything Hub server yet.'); e.code = 'email_not_configured'; e.status = 503; throw e; }
+          const limited = await rateLimit(env, 'email', who.uuid === SYSTEM_OWNER.uuid ? null : who, 'server');
+          if (limited) { const j = await limited.json(); throw Object.assign(new Error(j.message), { status: 429, code: 'rate_limited' }); }
           const r = await sendEmail(env, msg || {}, who);
           if (!r.delivered || !r.delivered.length) { const e = new Error(r.message || 'The email could not be sent.'); e.status = 502; throw e; }
           return r;
         },
         sendTransactional: async (msg) => self.ehubFor(who, ns, req).email.send(msg),
       },
-      ai: { chat: (...a) => aiChatSimple(env, ...a) },
+      ai: {
+        chat: async (...a) => {
+          const limited = await rateLimit(env, 'ai', who.uuid === SYSTEM_OWNER.uuid ? null : who, 'server');
+          if (limited) { const j = await limited.json(); throw Object.assign(new Error(j.message), { status: 429, code: 'rate_limited' }); }
+          return aiChatSimple(env, ...a);
+        },
+      },
       workers: {
         exec: async (u, init) => {
           const url = new URL(String(u && u.url ? u.url : u));
@@ -195,12 +336,93 @@ export class AppServer extends DurableObject {
     };
   }
 
+  // A published site ("site|<name>"): owner, then files in the same chunked store team servers use.
+  async site(request) {
+    const h = request.headers, st = this.ctx.storage, op = h.get('x-ehub-site'), uuid = h.get('x-ehub-uuid');
+    const owner = await st.get('site:owner');
+    const fsx = makeFS(st, 'site', SYSTEM_OWNER, '/', () => '');
+    const path = (() => { try { return decodeURIComponent(h.get('x-ehub-site-path') || ''); } catch { return ''; } })().replace(/^\/+/, '');
+    if (op === 'get') {
+      if (!owner) return json({ message: 'This site does not exist.' }, 404);
+      try { const b = await fsx.read('/' + path); return new Response(b, { headers: { 'content-type': b.type || 'application/octet-stream', 'cache-control': 'public, max-age=60' } }); }
+      catch { return new Response('<!doctype html><meta charset="utf-8"><title>Not found</title><p style="font:15px system-ui;padding:40px">This page isn’t published.</p>', { status: 404, headers: { 'content-type': 'text/html; charset=utf-8' } }); }
+    }
+    if (op === 'claim') {
+      if (owner && owner.uuid !== uuid) return json({ message: 'That site name is taken.' }, 409);
+      if (!owner) await st.put('site:owner', { uuid, at: Date.now() });
+      return json({ success: true, subdomain: h.get('x-ehub-site-name') });
+    }
+    if (!owner) return json({ message: 'This site does not exist.' }, 404);
+    if (owner.uuid !== uuid) return json({ message: 'Only the person who published this site can change it.' }, 403);
+    if (op === 'put') {
+      if (!path || path.length > 1000 || path.split('/').some((x) => x === '..')) return json({ message: 'Bad path.' }, 400);
+      const count = (await st.get('site:files')) || 0;
+      if (count > 5000) return json({ message: 'This site has too many files.' }, 413);
+      const type = h.get('x-ehub-site-type') || '';
+      const blob = new Blob([await request.arrayBuffer()], { type: /^[\w.+-]+\/[\w.+-]+/.test(type) && !/octet-stream/.test(type) ? type : '' });
+      const existed = await fsx.exists('/' + path);
+      await fsx.write('/' + path, blob, { overwrite: true });
+      if (!existed) await st.put('site:files', count + 1);
+      return json({ success: true });
+    }
+    if (op === 'del') {
+      if (path === '*' || path === '') { const kids = await st.list({ prefix: 'fs:site:' }); for (const k of [...kids.keys()]) await st.delete(k); await st.put('site:files', 0); }
+      else await fsx.delete('/' + path);
+      return json({ success: true });
+    }
+    if (op === 'drop') { await st.deleteAll(); return json({ success: true }); }
+    return json({ message: 'Unknown operation' }, 400);
+  }
+
+  // System instances ("sys|auth", "sys|limits") reached only from this Worker's own code.
+  async sys(op, body) {
+    const st = this.ctx.storage;
+    if (op === 'key') {
+      let k = await st.get('auth:key');
+      if (!k) { const raw = crypto.getRandomValues(new Uint8Array(32)); k = btoa(String.fromCharCode(...raw)); await st.put('auth:key', k); }
+      return { key: k };
+    }
+    if (op === 'claimed') return { claimed: !!(await st.get('claim:' + String(body.uuid || '').toLowerCase())) };
+    if (op === 'claim') {
+      const id = 'claim:' + String(body.uuid || '').toLowerCase(), cur = await st.get(id);
+      if (cur && cur.hash !== body.hash) return { ok: false };
+      if (!cur) await st.put(id, { hash: body.hash, at: Date.now() });
+      return { ok: true };
+    }
+    if (op === 'hit') {
+      // fixed windows; minute windows live in memory, longer ones are persisted
+      const now = Math.floor(Date.now() / 1000);
+      this.mem = this.mem || new Map();
+      const cur = [];
+      for (const b of body.buckets || []) {
+        const win = Number(b.win) || 60, slot = Math.floor(now / win), id = b.k + '|' + win + '|' + slot;
+        let n = this.mem.get(id);
+        if (n === undefined) n = win > 60 ? (await st.get('rl:' + id)) || 0 : 0;
+        if (n >= b.limit) return { ok: false, bucket: b.k, retryAfter: (slot + 1) * win - now };
+        cur.push([id, n, win]);
+      }
+      for (const [id, n, win] of cur) { this.mem.set(id, n + 1); if (win > 60) st.put('rl:' + id, n + 1); }
+      if (this.mem.size > 20000) this.mem.clear();
+      if (Math.random() < 0.002) { // drop counters from past windows
+        const old = await st.list({ prefix: 'rl:', limit: 1000 }), dead = [];
+        for (const k of old.keys()) { const [, w, sl] = k.slice(3).split('|'); if ((Number(sl) + 1) * Number(w) < now) dead.push(k); }
+        for (let i = 0; i < dead.length; i += 128) await st.delete(dead.slice(i, i + 128));
+      }
+      return { ok: true };
+    }
+    return { error: 'unknown op' };
+  }
+
   async fetch(request) {
     const h = request.headers;
+    const sysOp = h.get('x-ehub-sys');
+    if (sysOp) return json(await this.sys(sysOp, await request.json().catch(() => ({}))));
+    if (h.get('x-ehub-site')) return this.site(request);
     const key = h.get('x-ehub-key'), inst = h.get('x-ehub-inst'), app = h.get('x-ehub-app');
     const pathq = h.get('x-ehub-path') || '/';
+    if (!key || !SCRIPTS[key]) return json({ message: 'Not found' }, 404);
     await this.boot(key, inst, app, h.get('x-ehub-origin'));
-    const who = identityFromHeaders(h);
+    const who = await verifiedIdentity(this.env, h);
     const [path] = pathq.split('?');
 
     if (path === '/__deploy') {

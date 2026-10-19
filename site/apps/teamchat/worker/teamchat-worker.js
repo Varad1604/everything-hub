@@ -1,4 +1,4 @@
-/* teamchat-worker build=2234130e21f1 at=1792227428228 */
+/* teamchat-worker build=2234130e21f1 at=1792285182086 */
 (function() {
 	/**
 	* Past this a block takes no write that grows it by more than a few bytes
@@ -553,7 +553,7 @@
 	*/
 	var WORKER_BUILD = "2234130e21f1";
 	/** When the bundle was built, so two builds can be ordered (0 from source). */
-	var WORKER_BUILT_AT = 1792227428228;
+	var WORKER_BUILT_AT = 1792285182086;
 	/** The ehub.js build the platform baked into this deploy (its preamble's first
 	*  line); read on each call because the preamble exists only once deployed.
 	*  Null from source (tests, mock.html). */

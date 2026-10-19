@@ -8,7 +8,7 @@
  * - Other same-origin files (icons, manifest): stale while revalidate.
  * - Cross-origin requests (Everything Hub's API and SDK) are never touched.
  */
-const CACHE = 'field-service-v2-nolocal2';
+const CACHE = 'field-service-v2';
 // Build files go in one cache per release, numbered: a new release starts
 // the next one, and those older than the release it replaced are dropped
 // (tabs still open on that one may still load its files).

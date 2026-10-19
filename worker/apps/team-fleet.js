@@ -146,6 +146,9 @@ const inviteKey = (hash) => `flt:i:${hash}`;
 const recordKey = (bucket, id) => `${P}r:${bucket}:${id}`;
 
 async function listAll(kv, pattern) {
+  // A bare prefix is a prefix listing: make the wildcard explicit so glob-style
+  // stores (exact match without '*') return the collection too.
+  if (!/[*?]/.test(pattern)) pattern += '*';
   const out = [];
   let cursor;
   for (let guard = 0; guard < 1000; guard++) {

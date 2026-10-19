@@ -78,9 +78,11 @@
     };
   })();
   var b64url = function (s) { return btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
-  var AUTH_TOKEN = 'local.' + b64url(JSON.stringify({ t: 'au', v: '2', uu: USER.uuid, n: USER.display_name, app_uid: 'app-' + APP, local: true })) + '.everything';
+  var SESSION_SIG = (function () { try { var u = JSON.parse(LS.getItem('everything:user') || 'null'); return u && u.sig && u.uuid === USER.uuid ? String(u.sig) : ''; } catch (e) { return ''; } })();
+  function mkToken() { var o = { t: 'au', v: '2', uu: USER.uuid, n: USER.display_name, app_uid: 'app-' + APP, local: true }; if (SESSION_SIG) o.s = SESSION_SIG; return 'local.' + b64url(JSON.stringify(o)) + '.everything'; }
+  var AUTH_TOKEN = mkToken(), LEGACY_TOKEN = AUTH_TOKEN;
   var ORIGIN = location.origin, ONLINE = /^https?:$/.test(location.protocol);
-  function accessToken(path, ttlSec) { return 'ev.' + b64url(JSON.stringify({ t: 't', v: '2', uu: USER.uuid, n: USER.display_name, exp: nowSec() + (ttlSec || 86400), path: path || '' })) + '.hub'; }
+  function accessToken(path, ttlSec) { var o = { t: 't', v: '2', uu: USER.uuid, n: USER.display_name, exp: nowSec() + (ttlSec || 86400), path: path || '' }; if (SESSION_SIG) o.s = SESSION_SIG; return 'ev.' + b64url(JSON.stringify(o)) + '.hub'; }
   var IDENTITY_FILE = /(^|\/)[a-z-]*identity\/[^\/]+\.json$/i;
 
   /* ------------------------------------------- network routing (same-origin only) */
@@ -96,7 +98,50 @@
     var url = parseURL(u); if (!url) return false;
     return /\.invalid$/i.test(url.hostname) || TRACKER_HOST.test(url.hostname);
   }
-  function mapURL(u) { var w = workerTarget(u); return w || u; }
+  var SITE_HOST = /^([a-z0-9][a-z0-9-]*)\.ehub\.site$/i;
+  function siteTarget(u) {
+    var url = parseURL(u); if (!url) return null;
+    var m = SITE_HOST.exec(url.hostname); if (!m) return null;
+    return ORIGIN + '/s/' + m[1].toLowerCase() + (url.pathname || '/') + url.search + url.hash;
+  }
+  function siteText(t) { return String(t).replace(/https?:\/\/([a-z0-9][a-z0-9-]*)\.ehub\.site(?=[\/\s"'<)]|$)/gi, function (_, n) { return ORIGIN + '/s/' + n.toLowerCase(); }); }
+  function mapURL(u) { var w = workerTarget(u) || siteTarget(u); return w || u; }
+  var sessionReady = null, sessionRefused = false;
+  function authReady() {
+    if (!ONLINE || SESSION_SIG || sessionRefused) return Promise.resolve();
+    if (sessionReady) return sessionReady;
+    sessionReady = (async function () {
+      var run = async function () {
+        var u = {}; try { u = JSON.parse(LS.getItem('everything:user') || '{}') || {}; } catch (e) {}
+        if (u.sig && u.uuid === USER.uuid) { SESSION_SIG = String(u.sig); return; }
+        if (!u.secret) u.secret = rid(24);
+        if (!u.uuid) u.uuid = USER.uuid;
+        try { LS.setItem('everything:user', JSON.stringify(u)); } catch (e) {}
+        var r = await nativeFetch(ORIGIN + '/api/session', { method: 'POST', headers: { 'content-type': 'application/json', 'x-ehub-auth': LEGACY_TOKEN }, body: JSON.stringify({ secret: u.secret }) });
+        var j = await r.json().catch(function () { return {}; });
+        if (r.ok && j.sig) { SESSION_SIG = String(j.sig); u.sig = SESSION_SIG; try { LS.setItem('everything:user', JSON.stringify(u)); } catch (e) {} }
+        else if (r.status === 429) { sessionRefused = true; setTimeout(function () { sessionRefused = false; }, 10 * 60 * 1000); }
+        else if (r.status === 409 || r.status === 400) { sessionRefused = true; console.warn('[everything-core] could not claim this browser identity:', j.message || r.status); }
+      };
+      try { if (navigator.locks && navigator.locks.request) await navigator.locks.request('everything-session', run); else await run(); } catch (e) {}
+      if (SESSION_SIG) { AUTH_TOKEN = mkToken(); try { ehubObj.authToken = AUTH_TOKEN; } catch (e) {} }
+      sessionReady = null;
+    })();
+    return sessionReady;
+  }
+  // Same-origin /api calls: wait for the signed identity, then swap any stale token in the headers for the current one.
+  async function apiFetch(url, init) {
+    await authReady();
+    init = Object.assign({}, init || {});
+    if (init.headers) {
+      var hh = new Headers(init.headers);
+      ['x-ehub-auth', 'ehub-auth'].forEach(function (k) { var v = hh.get(k); if (v && v !== AUTH_TOKEN && /^local\./.test(v)) hh.set(k, AUTH_TOKEN); });
+      init.headers = hh;
+    }
+    var r = await nativeFetch(url, init);
+    if (r.status === 429) { try { var jj = await r.clone().json(); post('toast', { message: (jj.error && jj.error.message) || jj.message || 'Too many requests — try again shortly.' }); } catch (e) {} }
+    return r;
+  }
   function refusedResponse(u) {
     return new Response(JSON.stringify({ success: false, error: { code: 'unavailable', message: 'That service is not part of Everything Hub.' } }),
       { status: 503, statusText: 'Unavailable', headers: { 'content-type': 'application/json' } });
@@ -104,7 +149,7 @@
   var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
   if (nativeFetch) {
     window.fetch = function (input, init) {
-      var w = workerTarget(input);
+      var w = workerTarget(input) || siteTarget(input);
       if (w) {
         if (input && input.url && typeof Request !== 'undefined' && input instanceof Request) return nativeFetch(new Request(w, input), init);
         return nativeFetch(w, init);
@@ -147,8 +192,8 @@
     }
     if (navigator.sendBeacon) { var sb = navigator.sendBeacon.bind(navigator); navigator.sendBeacon = function (u, d) { return isBlockedURL(u) ? true : sb(mapURL(u), d); }; }
     if (window.EventSource) { var NES = window.EventSource; window.EventSource = function (u, o) { if (isBlockedURL(u)) { var f = new EventTarget(); f.readyState = 2; f.close = function () {}; return f; } return new NES(mapURL(u), o); }; window.EventSource.prototype = NES.prototype; }
-    ['HTMLImageElement', 'HTMLIFrameElement', 'HTMLLinkElement', 'HTMLSourceElement', 'HTMLMediaElement'].forEach(function (k) {
-      var C = window[k]; if (!C) return; var prop = k === 'HTMLLinkElement' ? 'href' : 'src';
+    ['HTMLImageElement', 'HTMLIFrameElement', 'HTMLLinkElement', 'HTMLAnchorElement', 'HTMLSourceElement', 'HTMLMediaElement'].forEach(function (k) {
+      var C = window[k]; if (!C) return; var prop = k === 'HTMLLinkElement' || k === 'HTMLAnchorElement' ? 'href' : 'src';
       var d = Object.getOwnPropertyDescriptor(C.prototype, prop);
       if (d && d.set) Object.defineProperty(C.prototype, prop, { configurable: true, enumerable: d.enumerable, get: d.get,
         set: function (v) { return d.set.call(this, isBlockedURL(v) ? 'about:blank' : mapURL(v)); } });
@@ -162,6 +207,7 @@
       }
       return nsa.call(this, n, v);
     };
+    if (navigator.clipboard && navigator.clipboard.writeText) { var cwt = navigator.clipboard.writeText.bind(navigator.clipboard); navigator.clipboard.writeText = function (t) { return cwt(siteText(t)); }; }
     var nopen = window.open;
     window.open = function (u) { if (u && isBlockedURL(String(u))) return null; var a = Array.prototype.slice.call(arguments); if (u) a[0] = mapURL(String(u)); return nopen.apply(window, a); };
     var srcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
@@ -191,12 +237,21 @@
     });
     return dbPromise;
   }
+  function storageError(e) {
+    if (e && (e.name === 'QuotaExceededError' || e.code === 22 || /quota/i.test(String(e.message)))) {
+      var m = 'Browser storage is full. Delete some files or app data (or export a backup from hub settings and clear space), then try again.';
+      post('toast', { message: m });
+      return err('storage_full', m, { name: 'QuotaExceededError', cause: e });
+    }
+    return e && e.code ? e : err('storage_error', 'Could not save: ' + ((e && (e.message || e.name)) || e), { cause: e });
+  }
   function reqP(r) { return new Promise(function (res, rej) { r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(r.error); }; }); }
   function txDone(t) { return new Promise(function (res, rej) { t.oncomplete = function () { res(); }; t.onerror = function () { rej(t.error); }; t.onabort = function () { rej(t.error || err('aborted', 'Transaction aborted')); }; }); }
   async function store(name, mode) { var d = await db(); return d.transaction(name, mode || 'readonly').objectStore(name); }
   async function getNode(path) { return reqP((await store('nodes')).get(path)); }
   async function childrenOf(path) { return reqP((await store('nodes')).index('parent').getAll(path)); }
   async function putNodes(nodes) { var d = await db(); var t = d.transaction('nodes', 'readwrite'); var s = t.objectStore('nodes'); nodes.forEach(function (n) { s.put(n); }); return txDone(t); }
+  async function putNodesSafe(nodes) { try { return await putNodes(nodes); } catch (e) { throw storageError(e); } }
   async function deleteKeys(paths) { var d = await db(); var t = d.transaction('nodes', 'readwrite'); var s = t.objectStore('nodes'); paths.forEach(function (p) { s.delete(p); }); return txDone(t); }
   async function allUnder(path) {
     var s = await store('nodes');
@@ -221,6 +276,7 @@
   var fsBus = (function () { try { return new BroadcastChannel('everything:fs'); } catch (e) { return null; } })();
   var fsListeners = [];
   function fsEmit(kind, path, extra) {
+    try { hostSync(kind, path, extra); } catch (e) {}
     var msg = Object.assign({ kind: kind, type: kind, path: path, app: APP, at: Date.now() }, extra || {});
     try { fsBus && fsBus.postMessage(msg); } catch (e) {}
   }
@@ -228,7 +284,7 @@
 
   function guessType(name) {
     var ext = (/\.([a-z0-9]+)$/i.exec(name) || [])[1];
-    var map = { txt: 'text/plain', md: 'text/markdown', html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json', csv: 'text/csv', xml: 'application/xml', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon', pdf: 'application/pdf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', zip: 'application/zip', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', stl: 'model/stl', glb: 'model/gltf-binary', gltf: 'model/gltf+json', dxf: 'image/vnd.dxf' };
+    var map = { ics: 'text/calendar', vcf: 'text/vcard', rss: 'application/rss+xml', woff2: 'font/woff2', txt: 'text/plain', md: 'text/markdown', html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json', csv: 'text/csv', xml: 'application/xml', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon', pdf: 'application/pdf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', zip: 'application/zip', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', stl: 'model/stl', glb: 'model/gltf-binary', gltf: 'model/gltf+json', dxf: 'image/vnd.dxf' };
     return (ext && map[ext.toLowerCase()]) || 'application/octet-stream';
   }
   function toItem(n) {
@@ -282,7 +338,7 @@
     if (data instanceof Blob) return data;
     if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return new Blob([data], { type: type || '' });
     if (typeof data === 'string') return new Blob([data], { type: type || 'text/plain' });
-    if (typeof data === 'object' && data.constructor === Object) return new Blob([JSON.stringify(data)], { type: 'application/json' });
+    if (typeof data === 'object' && (data.constructor === Object || Array.isArray(data) || Object.getPrototypeOf(data) === null)) return new Blob([JSON.stringify(data)], { type: 'application/json' });
     return new Blob([String(data)], { type: type || 'text/plain' });
   }
   async function resolveTarget(p) {
@@ -312,8 +368,10 @@
       var t = nowSec();
       var node = { path: p, parent: dirname(p), name: basename(p), is_dir: false, size: blob.size, type: blob.type || guessType(p), uid: existing ? existing.uid : 'ev-' + rid(10), created: existing ? existing.created : t, modified: t, blob: blob };
       try { await putNodes([node]); }
-      catch (e) { // Safari historically refused Blobs in IDB: store bytes instead.
-        node.blob = await blob.arrayBuffer(); node.raw = true; await putNodes([node]);
+      catch (e) {
+        if (e && (e.name === 'QuotaExceededError' || e.name === 'AbortError' && /quota/i.test(String(e.message)))) throw storageError(e);
+        // Safari historically refused Blobs in IDB: store bytes instead.
+        node.blob = await blob.arrayBuffer(); node.raw = true; await putNodesSafe([node]);
       }
       fsEmit('write', p, { uid: node.uid });
       return toItem(node);
@@ -406,6 +464,7 @@
       if (!n) throw err('subject_does_not_exist', p + ' does not exist');
       var dn = await getNode(d);
       var target = dn && dn.is_dir ? d + '/' + (opts.newName || basename(p)) : d;
+      if (n.is_dir && (target === p || target.indexOf(p + '/') === 0)) throw err('cannot_copy_into_self', 'Cannot copy a folder into itself');
       if (await getNode(target)) { if (opts.dedupeName || opts.dedupe_name) target = await dedupe(target); else if (!opts.overwrite) throw err('item_with_same_name_exists', 'An item with that name already exists'); }
       await ensureDir(dirname(target));
       var t = nowSec();
@@ -413,7 +472,7 @@
         var np = target + x.path.slice(p.length);
         return Object.assign({}, x, { path: np, parent: dirname(np), name: basename(np), uid: 'ev-' + rid(10), created: t, modified: t });
       });
-      await putNodes(nodes);
+      await putNodesSafe(nodes);
       fsEmit('write', target);
       return [{ copied: toItem(nodes[0]), overwritten: null }];
     },
@@ -460,6 +519,8 @@
     var n = await getNode(p);
     if (!n) throw err('subject_does_not_exist', p + ' does not exist', { path: p });
     if (target === p) return toItem(n);
+    if (n.is_dir && target.indexOf(p + '/') === 0) throw err('cannot_move_into_self', 'Cannot move a folder into itself');
+    if (p === HOME || p === '/') throw err('immutable', 'Cannot move ' + p);
     var clash = await getNode(target);
     if (clash) {
       if (opts && opts.overwrite) await fs.delete(target);
@@ -471,7 +532,7 @@
       var np = target + x.path.slice(p.length);
       return Object.assign({}, x, { path: np, parent: dirname(np), name: basename(np), modified: x === n ? t : x.modified });
     });
-    await putNodes(moved);
+    await putNodesSafe(moved);
     await deleteKeys([p].concat(kids.map(function (k) { return k.path; })));
     fsEmit('rename', target, { from: p });
     return toItem(moved[0]);
@@ -479,7 +540,15 @@
 
   /* ---------------------------------------------------------------------- kv */
   var KV_PREFIX = 'everything:kv:' + APP + ':';
-  var BIG = '\u0000idb';
+  var BIG = '\u0000idb', KV_INLINE = 96 * 1024;
+  var kvBus = (function () { try { return new BroadcastChannel('everything:kv'); } catch (e) { return null; } })();
+  var kvListeners = [];
+  function kvEmit(op, key, value, size) {
+    var msg = { op: op, app: APP, key: key, ts: Date.now() };
+    if (op === 'set' && size <= 256 * 1024) msg.value = value; else if (op === 'set') msg.large = true;
+    try { kvBus && kvBus.postMessage(msg); } catch (e) {}
+  }
+  if (kvBus) kvBus.onmessage = function (e) { var m = e.data; if (!m || m.app !== APP) return; kvListeners.slice().forEach(function (l) { try { l(m); } catch (x) {} }); };
   function kvRead(key) {
     var raw = LS.getItem(KV_PREFIX + key);
     if (raw == null) return null;
@@ -488,7 +557,7 @@
   async function kvLoad(key) {
     var rec = kvRead(key);
     if (!rec) return null;
-    if (rec.e && rec.e * 1000 <= Date.now()) { kvRemove(key); return null; }
+    if (rec.e && rec.e * 1000 <= Date.now()) { kvRemove(key, true); return null; }
     if (rec.b === BIG) {
       try { var big = await reqP((await store('kvbig')).get(KV_PREFIX + key)); if (big) return big; } catch (e) {}
       return null;
@@ -503,19 +572,30 @@
     if (expireAt) rec.e = expireAt;
     var json = JSON.stringify(rec);
     var prevRaw = LS.getItem(KV_PREFIX + key);
-    try {
-      LS.setItem(KV_PREFIX + key, json);
-      if (prevRaw && prevRaw.indexOf(BIG) >= 0) { try { var s = await store('kvbig', 'readwrite'); s.delete(KV_PREFIX + key); } catch (e) {} }
-    } catch (e) {
-      // localStorage is full: keep the value in IndexedDB and a marker here.
-      var s2 = await store('kvbig', 'readwrite');
-      await reqP(s2.put(rec, KV_PREFIX + key));
-      LS.setItem(KV_PREFIX + key, JSON.stringify({ b: BIG, e: expireAt || undefined }));
+    // localStorage (~5 MB) is shared by every app on this origin: values over KV_INLINE go to IndexedDB
+    // up front, and anything that no longer fits spills there too, with a small marker left behind.
+    var inline = json.length <= KV_INLINE;
+    if (inline) {
+      try {
+        LS.setItem(KV_PREFIX + key, json);
+        if (prevRaw && prevRaw.indexOf(BIG) >= 0) { try { var s = await store('kvbig', 'readwrite'); s.delete(KV_PREFIX + key); } catch (e) {} }
+      } catch (e) { inline = false; }
     }
+    if (!inline) {
+      try {
+        var d = await db(), t = d.transaction('kvbig', 'readwrite');
+        t.objectStore('kvbig').put(rec, KV_PREFIX + key);
+        await txDone(t);
+        LS.setItem(KV_PREFIX + key, JSON.stringify({ b: BIG, e: expireAt || undefined }));
+      } catch (e) { throw storageError(e); }
+    }
+    kvEmit('set', key, rec.v, json.length);
     return true;
   }
-  function kvRemove(key) {
+  function kvRemove(key, quiet) {
+    var had = LS.getItem(KV_PREFIX + key) != null;
     LS.removeItem(KV_PREFIX + key);
+    if (had && !quiet) kvEmit('del', key, null, 0);
     store('kvbig', 'readwrite').then(function (s) { s.delete(KV_PREFIX + key); }).catch(function () {});
   }
   function kvKeys() {
@@ -527,12 +607,38 @@
     var esc = String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
     return new RegExp('^' + esc + '$');
   }
+  function pathParts(path) {
+    if (Array.isArray(path)) return path.map(String);
+    var s = String(path), out = [], i = 0, cur = '';
+    while (i < s.length) {
+      var c = s[i];
+      if (c === '.') { if (cur) out.push(cur); cur = ''; i++; continue; }
+      if (c === '[') {
+        if (cur) { out.push(cur); cur = ''; }
+        var q = s[i + 1];
+        if (q === '"' || q === "'") {
+          var j = i + 2, buf = '';
+          while (j < s.length && s[j] !== q) { if (s[j] === '\\' && j + 1 < s.length) { buf += s[j + 1]; j += 2; continue; } buf += s[j]; j++; }
+          out.push(buf); i = s.indexOf(']', j); i = i < 0 ? s.length : i + 1; continue;
+        }
+        var e = s.indexOf(']', i); if (e < 0) { cur += s.slice(i); break; }
+        out.push(s.slice(i + 1, e).trim()); i = e + 1; continue;
+      }
+      cur += c; i++;
+    }
+    if (cur) out.push(cur);
+    return out.length ? out : [s];
+  }
   function setPath(obj, path, value) {
-    var parts = String(path).split('.'), o = obj;
-    for (var i = 0; i < parts.length - 1; i++) { if (o[parts[i]] == null || typeof o[parts[i]] !== 'object') o[parts[i]] = {}; o = o[parts[i]]; }
+    var parts = pathParts(path), o = obj;
+    for (var i = 0; i < parts.length - 1; i++) { if (o[parts[i]] == null || typeof o[parts[i]] !== 'object') o[parts[i]] = /^\d+$/.test(parts[i + 1]) ? [] : {}; o = o[parts[i]]; }
     o[parts[parts.length - 1]] = value;
   }
-  function getPath(obj, path) { return String(path).split('.').reduce(function (o, k) { return o == null ? undefined : o[k]; }, obj); }
+  function getPath(obj, path) { return pathParts(path).reduce(function (o, k) { return o == null ? undefined : o[k]; }, obj); }
+  function delPath(obj, path) {
+    var parts = pathParts(path), last = parts.pop(), o = parts.length ? getPath(obj, parts) : obj;
+    if (o && typeof o === 'object') { if (Array.isArray(o) && /^\d+$/.test(last)) o.splice(Number(last), 1); else delete o[last]; }
+  }
   var kvQueue = Promise.resolve();
   function serial(fn) { var r = kvQueue.then(fn, fn); kvQueue = r.catch(function () {}); return r; }
 
@@ -583,10 +689,11 @@
         return jsonClone(list);
       });
     },
-    async remove(key, paths) {
+    async remove(key) {
+      var paths = Array.prototype.slice.call(arguments, 1);
       return serial(async function () {
         var rec = await kvLoad(key); if (!rec || !rec.v || typeof rec.v !== 'object') return null;
-        [].concat(paths || []).forEach(function (p) { var parts = String(p).split('.'), last = parts.pop(), o = getPath(rec.v, parts.join('.')) || (parts.length ? null : rec.v); if (o && typeof o === 'object') delete o[last]; });
+        paths.reduce(function (a, x) { return a.concat(x); }, []).forEach(function (p) { if (p != null) delPath(rec.v, p); });
         await kvSave(key, rec.v, rec.e); return jsonClone(rec.v);
       });
     },
@@ -695,7 +802,7 @@
         var data = line.slice(5).trim();
         if (data === '[DONE]') continue;
         var j; try { j = JSON.parse(data); } catch (e) { continue; }
-        if (j.error) { yield { type: 'error', success: false, error: j.error }; continue; }
+        if (j.error) throw err('ai_error', String((j.error && (j.error.message || j.error)) || 'The AI stream failed'), { success: false });
         if (j.usage) usage = j.usage;
         var ch = j.choices && j.choices[0]; if (!ch) continue;
         var d = ch.delta || {};
@@ -739,7 +846,7 @@
       if (a.opts.response_format) body.response_format = a.opts.response_format;
       if (a.opts.stream) { body.stream = true; body.stream_options = { include_usage: true }; }
       var resp;
-      try { resp = await nativeFetch(aiURL(c, '/chat/completions'), { method: 'POST', headers: aiHeaders(c), body: JSON.stringify(body) }); }
+      try { resp = await apiFetch(aiURL(c, '/chat/completions'), { method: 'POST', headers: aiHeaders(c), body: JSON.stringify(body) }); }
       catch (e) { throw err('ai_unreachable', 'Could not reach the AI endpoint: ' + (e.message || e)); }
       if (!resp.ok) {
         var t = ''; try { t = await resp.text(); } catch (e) {}
@@ -760,7 +867,7 @@
       if (opts === true) { var ti = new Image(); ti.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="100%" height="100%" fill="#e9e4da"/></svg>'); return ti; }
       var c = aiConfig(); if (!c) throw aiOff();
       if (typeof prompt === 'object' && prompt) { opts = prompt; prompt = prompt.prompt; }
-      var resp = await nativeFetch(aiURL(c, '/images/generations'), { method: 'POST', headers: aiHeaders(c), body: JSON.stringify({ model: c.imageModel || (opts && opts.model) || 'gpt-image-1', prompt: String(prompt), n: 1, size: (opts && opts.size) || '1024x1024' }) });
+      var resp = await apiFetch(aiURL(c, '/images/generations'), { method: 'POST', headers: aiHeaders(c), body: JSON.stringify({ model: c.imageModel || (opts && opts.model) || 'gpt-image-1', prompt: String(prompt), n: 1, size: (opts && opts.size) || '1024x1024' }) });
       if (!resp.ok) throw err('ai_error_' + resp.status, 'Image generation failed (' + resp.status + ')');
       var j = await resp.json(), d = (j.data || [])[0] || {};
       var img = new Image(); img.alt = String(prompt);
@@ -777,7 +884,7 @@
       var c = aiConfig();
       if (c && c.tts !== false) {
         try {
-          var resp = await nativeFetch(aiURL(c, '/audio/speech'), { method: 'POST', headers: aiHeaders(c), body: JSON.stringify({ model: c.ttsModel || 'tts-1', input: String(text), voice: (opts && opts.voice) || 'alloy' }) });
+          var resp = await apiFetch(aiURL(c, '/audio/speech'), { method: 'POST', headers: aiHeaders(c), body: JSON.stringify({ model: c.ttsModel || 'tts-1', input: String(text), voice: (opts && opts.voice) || 'alloy' }) });
           if (resp.ok) { var a = new Audio(URL.createObjectURL(await resp.blob())); return a; }
         } catch (e) {}
       }
@@ -787,7 +894,7 @@
       var c = aiConfig(); if (!c) throw aiOff();
       var fd = new FormData(); fd.append('file', audio instanceof Blob ? audio : await (await nativeFetch(audio)).blob(), 'audio.webm'); fd.append('model', c.sttModel || 'whisper-1');
       var h = aiHeaders(c); delete h['content-type'];
-      var resp = await nativeFetch(aiURL(c, '/audio/transcriptions'), { method: 'POST', headers: h, body: fd });
+      var resp = await apiFetch(aiURL(c, '/audio/transcriptions'), { method: 'POST', headers: h, body: fd });
       if (!resp.ok) throw err('ai_error_' + resp.status, 'Transcription failed (' + resp.status + ')');
       var j = await resp.json(); return { text: j.text || '' , toString: function () { return j.text || ''; } };
     },
@@ -807,7 +914,7 @@
       var to = [].concat(msg.to || []);
       if (ONLINE && to.length) {
         try {
-          var r = await nativeFetch(ORIGIN + '/api/email/send', { method: 'POST', headers: { 'content-type': 'application/json', 'x-ehub-auth': AUTH_TOKEN },
+          var r = await apiFetch(ORIGIN + '/api/email/send', { method: 'POST', headers: { 'content-type': 'application/json', 'x-ehub-auth': AUTH_TOKEN },
             body: JSON.stringify({ app: APP, to: to, cc: [].concat(msg.cc || []), bcc: [].concat(msg.bcc || []), subject: msg.subject || '', text: msg.text || '', html: msg.html || '', reply_to: msg.reply_to || msg.replyTo,
               attachments: await Promise.all((msg.attachments || []).map(async function (a) { return { filename: a.filename, contentType: a.contentType, content: typeof a.content === 'string' ? a.content : a.content instanceof Blob ? await blobB64(a.content) : '' }; })) }) });
           var j = await r.json().catch(function () { return {}; });
@@ -841,7 +948,7 @@
       writeJ(WK, all);
       if (ONLINE) {
         try {
-          var r = await nativeFetch(ORIGIN + '/api/w/' + encodeURIComponent(APP) + '/' + n + '/__deploy', { method: 'POST', headers: { 'x-ehub-auth': AUTH_TOKEN } });
+          var r = await apiFetch(ORIGIN + '/api/w/' + encodeURIComponent(APP) + '/' + n + '/__deploy', { method: 'POST', headers: { 'x-ehub-auth': AUTH_TOKEN } });
           if (!r.ok) { var j = await r.json().catch(function () { return {}; }); return { success: false, name: n, errors: [j.message || 'This app has no team server on Everything Hub.'] }; }
         } catch (e) { return { success: false, name: n, errors: ['Could not reach the Everything Hub server.'] }; }
       }
@@ -863,22 +970,72 @@
       init.headers = h;
       var target = workerTarget(url) || String(url && url.url ? url.url : url);
       if (isBlockedURL(target)) return refusedResponse(target);
-      return nativeFetch(target, init);
+      return apiFetch(target, init);
     },
     async getLoggingHandle() { return { close: function () {}, addEventListener: function () {} }; },
   };
+  // Hosting: a folder on the drive published at <hub>/s/<name>/ (public, sandboxed). The server keeps a copy;
+  // writes, moves and deletes under a published folder are pushed to it automatically while online.
+  function siteName(n) { return String(n || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 63); }
+  function siteURL(n) { return ORIGIN + '/s/' + n + '/'; }
+  async function siteCall(method, sub, rel, body) {
+    var u = ORIGIN + '/api/site/' + encodeURIComponent(sub) + (rel != null ? '/f/' + String(rel).split('/').map(encodeURIComponent).join('/') : '');
+    var r = await apiFetch(u, { method: method, headers: { 'x-ehub-auth': AUTH_TOKEN }, body: body });
+    var j = await r.json().catch(function () { return {}; });
+    if (!r.ok) throw err(r.status === 409 ? 'subdomain_taken' : r.status === 404 ? 'subject_does_not_exist' : 'hosting_error', j.message || ('Publishing failed (' + r.status + ')'), { status: r.status });
+    return j;
+  }
+  async function siteUpload(sub, dir) {
+    var n = await getNode(dir); if (!n) return 0;
+    var files = n.is_dir ? (await allUnder(dir)).filter(function (x) { return !x.is_dir; }) : [n];
+    for (var i = 0; i < files.length; i++) { var rel = n.is_dir ? files[i].path.slice(dir.length + 1) : 'index.html'; await siteCall('PUT', sub, rel, await fs.read(files[i].path)); }
+    return files.length;
+  }
+  var hostQ = Promise.resolve();
+  function hostSync(kind, path, extra) {
+    if (!ONLINE) return;
+    var all = readJ(HK, {}), subs = Object.keys(all); if (!subs.length) return;
+    subs.forEach(function (sub) {
+      var d = all[sub].root_dir && all[sub].root_dir.path; if (!d) return;
+      var inside = function (p) { return p === d || String(p).indexOf(d + '/') === 0; };
+      var rel = function (p) { return p === d ? '' : String(p).slice(d.length + 1); };
+      var jobs = [];
+      if (extra && extra.from && inside(extra.from)) jobs.push(function () { return siteCall('DELETE', sub, rel(extra.from) || '*'); });
+      if ((kind === 'write' || kind === 'rename') && inside(path) && path !== d) jobs.push(async function () {
+        var n = await getNode(path); if (!n) return;
+        if (n.is_dir) { var kids = (await allUnder(path)).filter(function (x) { return !x.is_dir; }); for (var i = 0; i < kids.length; i++) await siteCall('PUT', sub, rel(kids[i].path), await fs.read(kids[i].path)); }
+        else await siteCall('PUT', sub, rel(path), await fs.read(path));
+      });
+      if (kind === 'delete' && inside(path)) jobs.push(function () { return siteCall('DELETE', sub, rel(path) || '*'); });
+      jobs.forEach(function (j) { hostQ = hostQ.then(j).catch(function (e) { console.warn('[everything-core] publish sync failed', e && e.message); }); });
+    });
+  }
   var hosting = {
     async create(subdomain, dir) {
       if (subdomain && typeof subdomain === 'object') { dir = subdomain.root_dir; subdomain = subdomain.subdomain; }
+      var sub = siteName(subdomain) || ('site-' + rid(4));
+      if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(sub)) throw err('invalid_subdomain', 'Site names use letters, digits and dashes (2-63 characters).');
       var all = readJ(HK, {});
-      if (all[subdomain]) throw err('subdomain_taken', 'Subdomain already exists');
-      all[subdomain] = { uid: 'site-' + rid(6), subdomain: subdomain || ('site-' + rid(3)), root_dir: dir ? { path: normPath(dir) } : null, created_at: new Date().toISOString(), local: true };
-      writeJ(HK, all); return all[subdomain];
+      var root = dir ? normPath(dir && dir.path ? dir.path : dir) : null;
+      if (ONLINE) { await siteCall('POST', sub); if (root) await siteUpload(sub, root); }
+      else if (all[sub]) throw err('subdomain_taken', 'Subdomain already exists');
+      all[sub] = { uid: 'site-' + rid(6), subdomain: sub, root_dir: root ? { path: root, name: basename(root) } : null, url: siteURL(sub), created_at: new Date().toISOString(), app: APP };
+      writeJ(HK, all); return Object.assign({}, all[sub]);
     },
-    async update(subdomain, dir) { var all = readJ(HK, {}); if (!all[subdomain]) throw err('subject_does_not_exist', 'Subdomain does not exist'); all[subdomain].root_dir = { path: normPath(dir) }; writeJ(HK, all); return all[subdomain]; },
-    async get(subdomain) { var s = readJ(HK, {})[subdomain]; if (!s) throw err('subject_does_not_exist', 'Subdomain does not exist'); return s; },
-    async list() { var all = readJ(HK, {}); return Object.keys(all).map(function (k) { return all[k]; }); },
-    async delete(subdomain) { var all = readJ(HK, {}); delete all[subdomain]; writeJ(HK, all); return { success: true }; },
+    async update(subdomain, dir) {
+      var sub = siteName(subdomain), all = readJ(HK, {});
+      if (!all[sub]) throw err('subject_does_not_exist', 'Subdomain does not exist');
+      var root = normPath(dir && dir.path ? dir.path : dir);
+      if (ONLINE) { await siteCall('DELETE', sub, '*'); await siteUpload(sub, root); }
+      all[sub].root_dir = { path: root, name: basename(root) }; writeJ(HK, all); return Object.assign({}, all[sub]);
+    },
+    async get(subdomain) { var s = readJ(HK, {})[siteName(subdomain)]; if (!s) throw err('subject_does_not_exist', 'Subdomain does not exist'); return Object.assign({}, s); },
+    async list() { var all = readJ(HK, {}); return Object.keys(all).map(function (k) { return Object.assign({}, all[k]); }); },
+    async delete(subdomain) {
+      var sub = siteName(subdomain), all = readJ(HK, {});
+      if (ONLINE) { try { await siteCall('DELETE', sub); } catch (e) { if (e.code !== 'subject_does_not_exist') throw e; } }
+      delete all[sub]; writeJ(HK, all); return { success: true };
+    },
   };
   var apps = {
     async list() { return []; }, async get(name) { return { name: name || APP, uid: 'app-' + (name || APP), title: name || APP, index_url: location.href }; },
@@ -997,6 +1154,24 @@
   var events = {
     async onLocal(subject, cb, opts) {
       var id = 'sub-' + rid(6), s = String(subject || '');
+      opts = opts || {};
+      if (s.indexOf('kv:') === 0) {
+        // kv:<app>:<key or glob>. Changes made by this app in other tabs/windows of this browser are delivered;
+        // shared (team) data lives on the app's team server, which has no push channel, so those subjects are refused
+        // and the app falls back to polling.
+        var rest = s.slice(3), ci = rest.indexOf(':'), ns = ci < 0 ? rest : rest.slice(0, ci), kpat = ci < 0 ? '*' : rest.slice(ci + 1);
+        if ([APP, 'app-' + APP].indexOf(ns) < 0) throw err('not_supported', 'Live updates for shared data are not available here; the app refreshes on its own.');
+        var kre = globToRe(kpat || '*');
+        var kl = function (m) {
+          if (!kre.test(m.key)) return;
+          var ev = { key: m.key, op: m.op, ts: m.ts, subject: s };
+          if (opts.includeValue !== false && 'value' in m) ev.value = m.value;
+          try { cb({ subject: s, event: ev, data: ev }); } catch (e) { console.error(e); }
+        };
+        kvListeners.push(kl);
+        var ksub = { id: id, subject: s, off: function () { var i = kvListeners.indexOf(kl); if (i >= 0) kvListeners.splice(i, 1); subs.delete(id); }, unsubscribe: function () { ksub.off(); }, close: function () { ksub.off(); } };
+        subs.set(id, ksub); return ksub;
+      }
       var root = s.indexOf('fs:') === 0 ? normPath(s.slice(3)) : null;
       var l = function (m) { if (root && (m.path === root || String(m.path).indexOf(root + '/') === 0 || String(m.from || '').indexOf(root) === 0)) cb({ subject: s, event: m, data: m }); };
       fsListeners.push(l);
@@ -1121,6 +1296,20 @@
       inp.click();
     });
   }
+  // A file picked from the device lands on ~/Desktop. Re-picking the same file reuses its copy; a different file
+  // with the same name gets a fresh name instead of overwriting what is already there.
+  async function sameBytes(a, b) {
+    if (a.size !== b.size) return false;
+    if (a.size > 64 * 1024 * 1024) return false;
+    var x = new Uint8Array(await a.arrayBuffer()), y = new Uint8Array(await b.arrayBuffer());
+    for (var i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+    return true;
+  }
+  async function importPicked(path, file) {
+    var p = normPath(path), n = await getNode(p);
+    if (n && !n.is_dir) { try { if (await sameBytes(await fs.read(p), file)) return toItem(n); } catch (e) {} }
+    return fs.write(p, file, { dedupeName: !!n });
+  }
   function download(blob, name) {
     var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name || 'download';
     document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
@@ -1133,7 +1322,7 @@
       var files = await pickFiles({ multiple: !!opts.multiple, accept: opts.accept });
       var out = [];
       for (var i = 0; i < files.length; i++) {
-        var it = await fs.write('~/Desktop/' + files[i].name, files[i], { overwrite: true });
+        var it = await importPicked('~/Desktop/' + files[i].name, files[i]);
         Object.defineProperty(it, 'file', { enumerable: false, value: files[i] });
         out.push(it);
       }
@@ -1177,12 +1366,16 @@
     async showColorPicker(def) { return new Promise(function (r) { var i = document.createElement('input'); i.type = 'color'; i.value = typeof def === 'string' ? def : (def && def.defaultColor) || '#000000'; i.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(i); i.onchange = function () { r(i.value); i.remove(); }; i.click(); }); },
     async showFontPicker() { return { fontFamily: 'Inter' }; },
     async launchApp(name, args) {
-      var appName = typeof name === 'object' && name ? name.name || name.app : name;
-      post('launchApp', { target: String(appName || ''), args: args || (name && name.args) || null });
-      var conn = { usesSDK: true, response: {}, postMessage: function () {}, on: function () {}, off: function () {}, addEventListener: function () {}, close: function () {} };
-      return conn;
+      var o = name && typeof name === 'object' ? name : { name: name, args: args };
+      var appName = String(o.name || o.app || '');
+      var a = Object.assign({}, o.args || (o !== name ? null : args) || {});
+      var paths = [].concat(o.file_paths || o.items || a.items || a.file_paths || []).map(function (x) { return normPath(x && x.path ? x.path : x); });
+      delete a.items; delete a.file_paths;
+      if (o.background || (a.service && !paths.length)) return childApp(appName, a);
+      post('launchApp', { target: appName, args: Object.assign({}, a, paths.length ? { items: paths } : {}) });
+      return makeConn(null);
     },
-    parentApp: function () { return null; },
+    parentApp: function () { return PARENT_APP; },
     setWindowTitle: function (t) { try { document.title = String(t); } catch (e) {} post('setWindowTitle', { title: String(t) }); return Promise.resolve(); },
     setWindowSize: function () { return Promise.resolve(); }, setWindowWidth: function () { return Promise.resolve(); }, setWindowHeight: function () { return Promise.resolve(); },
     setWindowPosition: function () { return Promise.resolve(); }, setWindowX: function () { return Promise.resolve(); }, setWindowY: function () { return Promise.resolve(); },
@@ -1201,6 +1394,49 @@
     exit: function () { return ehubObj.exit(); },
     isWindowFocused: function () { return document.hasFocus(); },
   };
+  /* ------------------------------------- app-to-app connections (launchApp / parentApp) */
+  // An app launched in the background (e.g. Calendar asking Contacts for people) runs in a hidden same-origin
+  // frame inside the caller; both sides talk through connection objects with postMessage / on('message').
+  function makeConn(win) {
+    var t = new EventTarget(), handlers = [];
+    var c = {
+      usesSDK: !!win, response: {}, _win: win, closed: false,
+      postMessage: function (m) { if (c._win && !c.closed) try { c._win.postMessage({ everything: 1, type: 'appmsg', data: jsonClone(m) }, location.origin); } catch (e) {} },
+      on: function (ev, fn) { handlers.push({ ev: ev, fn: fn }); return c; },
+      off: function (ev, fn) { handlers = handlers.filter(function (h) { return !(h.ev === ev && (!fn || h.fn === fn)); }); return c; },
+      addEventListener: function (ev, fn) { t.addEventListener(ev, fn); }, removeEventListener: function (ev, fn) { t.removeEventListener(ev, fn); },
+      _emit: function (ev, data) {
+        handlers.slice().forEach(function (h) { if (h.ev === ev) try { h.fn(data); } catch (e) { console.error(e); } });
+        try { t.dispatchEvent(Object.assign(new Event(ev), { data: data })); } catch (e) {}
+      },
+      close: function () { if (c.closed) return; c.closed = true; if (c._frame) { try { c._frame.remove(); } catch (e) {} children.delete(c._win); } c._emit('close', {}); },
+    };
+    return c;
+  }
+  var children = new Map();
+  function childApp(appName, args) {
+    var id = String(appName).toLowerCase().replace(/^ehub[-_]/, '').replace(/[^a-z0-9-]/g, '-');
+    var f = document.createElement('iframe');
+    f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
+    f.style.cssText = 'position:fixed;left:-10000px;top:0;width:800px;height:600px;border:0;opacity:0;pointer-events:none';
+    var base = location.pathname.replace(/\/apps\/[^/]+\/.*$/, '/');
+    f.src = base + 'apps/' + encodeURIComponent(id) + '/index.html?ehub.source_app.name=' + encodeURIComponent(APP) + '&everything-args=' + encodeURIComponent(JSON.stringify(args || {}));
+    (document.body || document.documentElement).appendChild(f);
+    var conn = makeConn(f.contentWindow); conn._frame = f;
+    children.set(f.contentWindow, conn);
+    f.addEventListener('load', function () { if (children.get(conn._win) !== conn) { children.delete(conn._win); conn._win = f.contentWindow; children.set(conn._win, conn); } });
+    f.addEventListener('error', function () { conn.close(); });
+    return conn;
+  }
+  var LAUNCH_ARGS = (function () { try { var q = new URLSearchParams(location.search).get('everything-args'); return q ? JSON.parse(q) : null; } catch (e) { return null; } })();
+  var SOURCE_APP = (function () { try { return new URLSearchParams(location.search).get('ehub.source_app.name') || ''; } catch (e) { return ''; } })();
+  var PARENT_APP = (function () {
+    if (!IN_FRAME || !SOURCE_APP) return null;
+    var c = makeConn(window.parent); c.name = SOURCE_APP; c.appName = SOURCE_APP;
+    c.close = function () { ehubObj.exit(); };
+    return c;
+  })();
+
   var pendingItems = null;
   async function deliverItems(paths) {
     pendingItems = paths;
@@ -1217,6 +1453,16 @@
     if (d.type === 'items' && Array.isArray(d.items)) deliverItems(d.items);
     if (d.type === 'requestClose') { if (closeHandler) { try { closeHandler(); } catch (x) { ehubObj.exit(); } } else ehubObj.exit(); }
     if (d.type === 'message') msgHandlers.forEach(function (h) { if (h.ev === 'message') try { h.cb(d.data); } catch (x) {} });
+    if (d.type === 'appmsg' && PARENT_APP) PARENT_APP._emit('message', d.data);
+  });
+  // messages from apps this one launched in the background
+  window.addEventListener('message', function (e) {
+    if (e.origin !== location.origin || !e.data || e.data.everything !== 1) return;
+    var c = children.get(e.source); if (!c) return;
+    var d = e.data;
+    if (d.type === 'appmsg') c._emit('message', d.data);
+    else if (d.type === 'exit') c.close();
+    else if (d.type === 'toast' || d.type === 'launchApp') post(d.type, d);
   });
   try {
     var q = new URLSearchParams(location.search).get('everything-items') || (/[#&]everything-items=([^&]+)/.exec(location.hash) || [])[1];
@@ -1231,7 +1477,7 @@
       init = Object.assign({}, init || {});
       var h = new Headers(init.headers || {}); h.set('x-ehub-target', url.href); h.set('x-ehub-auth', AUTH_TOKEN);
       init.headers = h;
-      return nativeFetch(ORIGIN + '/api/fetch', init);
+      return apiFetch(ORIGIN + '/api/fetch', init);
     },
     Socket: function () { var t = new EventTarget(); t.write = function () {}; t.close = function () {}; t.on = function (n, f) { t.addEventListener(n, function (e) { f(e.detail); }); }; setTimeout(function () { t.dispatchEvent(new CustomEvent('error', { detail: 'Raw sockets are not available in Everything' })); }, 0); return t; },
   };
@@ -1243,7 +1489,8 @@
   var ehubObj = {
     __everything: true,
     version: '3.0.0-everything-hub',
-    env: 'web',
+    env: SOURCE_APP && IN_FRAME ? 'app' : 'web',
+    args: LAUNCH_ARGS || {},
     appID: APP,
     appName: APP,
     appDataPath: HOME + '/AppData/' + APP,
@@ -1311,6 +1558,7 @@
   });
 
   bootstrap().catch(function (e) { console.warn('[ehub-local] drive unavailable', e); });
+  if (ONLINE) setTimeout(function () { authReady(); }, 0);
   post('ready', { title: document.title });
   try { document.dispatchEvent(new Event('ehub.ready')); window.dispatchEvent(new Event('ehub-ready')); } catch (e) {}
 })();
