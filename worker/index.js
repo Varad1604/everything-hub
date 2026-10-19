@@ -5,6 +5,7 @@
 //   /api/fetch                       CORS-free proxy for ehub.net.fetch (target in x-ehub-target)
 //   /api/email/send                  outbound mail through Resend when RESEND_API_KEY is set
 //   /api/peer/<code>                 WebSocket signalling room for ehub.peer (Durable Object PeerRoom)
+//   /api/turn                        ICE servers for ehub.peer: Cloudflare Realtime TURN when CF_TURN_KEY_ID + CF_TURN_KEY_API_TOKEN are set, else STUN
 //   /api/w/<app>/<instance>/<path>   an app's team server (Durable Object AppServer runs the app's own script)
 //   /api/site/<name>[/f/<path>]      publish a drive folder (ehub.hosting); served publicly at /s/<name>/<path>
 import { DurableObject } from 'cloudflare:workers';
@@ -24,7 +25,7 @@ const LIMITS = {
   LIMIT_IMAGE_USER_DAY: 25, LIMIT_IMAGE_GLOBAL_DAY: 300,
   LIMIT_FETCH_USER_MIN: 120, LIMIT_FETCH_IP_MIN: 240, LIMIT_FETCH_USER_DAY: 5000,
   LIMIT_EMAIL_USER_DAY: 30, LIMIT_EMAIL_IP_DAY: 60, LIMIT_EMAIL_GLOBAL_DAY: 300,
-  LIMIT_SESSION_IP_HOUR: 300,
+  LIMIT_SESSION_IP_HOUR: 300, LIMIT_TURN_IP_HOUR: 240,
 };
 const lim = (env, k) => { const v = Number(env && env[k]); return Number.isFinite(v) && v > 0 ? v : LIMITS[k]; };
 const clientIP = (request) => request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || 'local';
@@ -36,6 +37,7 @@ function bucketsFor(env, kind, who, ip) {
   if (kind === 'fetch') { add('u:' + u, 'LIMIT_FETCH_USER_MIN', 60); add('ip:' + ip, 'LIMIT_FETCH_IP_MIN', 60); add('u:' + u, 'LIMIT_FETCH_USER_DAY', 86400); }
   if (kind === 'email') { add('u:' + u, 'LIMIT_EMAIL_USER_DAY', 86400); add('ip:' + ip, 'LIMIT_EMAIL_IP_DAY', 86400); add('all', 'LIMIT_EMAIL_GLOBAL_DAY', 86400); }
   if (kind === 'session') add('ip:' + ip, 'LIMIT_SESSION_IP_HOUR', 3600);
+  if (kind === 'turn') add('ip:' + ip, 'LIMIT_TURN_IP_HOUR', 3600);
   return B;
 }
 // Returns null when allowed, or a 429 Response.
@@ -80,7 +82,7 @@ export default {
 async function api(request, env, url) {
   const p = url.pathname;
   if (p === '/api/health' || p === '/api/') {
-    return json({ ok: true, name: 'everything-hub', build: BUILD, ai: !!env.AI, email: emailConfigured(env), teamServers: Object.keys(BY_APP).length, sharedServers: Object.keys(FIXED).length, time: new Date().toISOString() });
+    return json({ ok: true, name: 'everything-hub', build: BUILD, ai: !!env.AI, email: emailConfigured(env), turn: turnConfigured(env), teamServers: Object.keys(BY_APP).length, sharedServers: Object.keys(FIXED).length, time: new Date().toISOString() });
   }
   // The /api is for this site's own pages: refuse calls made from other origins (browsers send Origin on those).
   const origin = request.headers.get('origin');
@@ -108,6 +110,7 @@ async function api(request, env, url) {
     return aiSpeech(env, await readJSON(request, 64 * 1024));
   }
   if (p === '/api/fetch') return proxyFetch(request, env, url, ip);
+  if (p === '/api/turn') return turnServers(request, env, ip);
   if (p === '/api/email/send' && request.method === 'POST') {
     const who = await verifiedIdentity(env, request.headers);
     if (!who) return json({ message: 'Sign-in token missing.' }, 401);
@@ -242,8 +245,40 @@ async function serveSite(env, url) {
   return new Response(r.body, { status: r.status, headers: h });
 }
 
+/* ------------------------------------------------------------ ICE / TURN */
+const STUN_ONLY = [{ urls: ['stun:stun.cloudflare.com:3478'] }];
+const TURN_TTL = 86400;
+const turnConfigured = (env) => !!(env && env.CF_TURN_KEY_ID && env.CF_TURN_KEY_API_TOKEN);
+// GET /api/turn -> { iceServers, ttl, turn }. TURN credentials are minted for signed-in browsers only; everyone else,
+// and every failure, gets STUN (direct connections still work on most networks).
+async function turnServers(request, env, ip) {
+  const stun = (why) => json({ iceServers: STUN_ONLY, ttl: 3600, turn: false, reason: why }, 200, { 'cache-control': 'no-store' });
+  if (!turnConfigured(env)) return stun('not_configured');
+  const who = await verifiedIdentity(env, request.headers);
+  if (!who) return stun('not_signed_in');
+  const limited = await rateLimit(env, 'turn', who, ip);
+  if (limited) return stun('rate_limited');
+  try {
+    const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(env.CF_TURN_KEY_ID)}/credentials/generate-ice-servers`, {
+      method: 'POST', headers: { authorization: `Bearer ${env.CF_TURN_KEY_API_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify({ ttl: TURN_TTL }),
+    });
+    if (!r.ok) return stun('turn_error_' + r.status);
+    const j = await r.json();
+    let ice = Array.isArray(j.iceServers) ? j.iceServers : j.iceServers ? [j.iceServers] : [];
+    // Browsers time out on the :53 variants that some networks block; keep them out.
+    ice = ice.map((s) => ({ ...s, urls: [].concat(s.urls || []).filter((u) => !/:53(\?|$)/.test(u)) })).filter((s) => s.urls.length);
+    if (!ice.length) return stun('turn_empty');
+    return json({ iceServers: ice, ttl: TURN_TTL, turn: true }, 200, { 'cache-control': 'no-store' });
+  } catch (e) { return stun('turn_unreachable'); }
+}
+
 /* ------------------------------------------------------------ peer signalling */
 export class PeerRoom extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    // Keep-alive pings are answered here without waking the object or reaching the other peers.
+    try { this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"t":"ping"}', '{"t":"pong"}')); } catch {}
+  }
   async fetch(request) {
     if (this.ctx.getWebSockets().length >= 48) return new Response('Room is full', { status: 429 });
     const pair = new WebSocketPair();

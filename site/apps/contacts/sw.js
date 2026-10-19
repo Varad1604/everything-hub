@@ -2,7 +2,7 @@
  *
  * Deliberately conservative: it ONLY touches same-origin GET requests for the
  * app's own static shell. Every cross-origin request — most importantly the
- * Everything Hub SDK (js.ehub.com) and all Everything Hub API / KV / auth traffic — is left
+ * Everything Hub SDK and all Everything Hub API / KV / auth traffic — is left
  * entirely to the network, so this worker can never serve stale cloud data or
  * interfere with sign-in.
  *

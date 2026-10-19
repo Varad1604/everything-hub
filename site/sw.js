@@ -4,7 +4,7 @@
  *       content-hashed build assets are cache-first (they never change); everything else is stale-while-revalidate.
  * The app cache survives updates so apps opened before keep working offline; only the shell cache is versioned.
  * Retired hosts (*.invalid) are never contacted; the old SDK address is answered with everything-core.js. */
-const VERSION = 'everything-v4-a30e6a96b2';
+const VERSION = 'everything-v4-3165bf05d8';
 const SHELL = `${VERSION}-shell`;
 const APPS = 'everything-apps-v4';
 const FONTS = 'everything-fonts-v4';
@@ -13,17 +13,33 @@ const EHUB = /\.invalid$/i;
 const TRACKERS = /(^|\.)(plausible\.io|google-analytics\.com|googletagmanager\.com|analytics\.google\.com|segment\.io|cdn\.segment\.com|mixpanel\.com|hotjar\.com|posthog\.com|sentry\.io)$/i;
 const HASHED = /\/assets\/[^/]+[-.][A-Za-z0-9_]{8,}\.(?:js|mjs|css|wasm|woff2?|ttf|png|jpe?g|webp|avif|svg|gif|json|data|bin)$/;
 
+// Install never fails on a flaky (mobile) connection: each shell file is cached on its own; a miss is fetched later.
+// A failed install would leave an older worker (and its old pages) in charge indefinitely.
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
+  e.waitUntil((async () => {
+    const c = await caches.open(SHELL);
+    await Promise.allSettled(SHELL_FILES.map(async (f) => { const r = await fetch(new Request(f, { cache: 'reload' })); if (r.ok) await c.put(f, await clean(r)); }));
+    await self.skipWaiting();
+  })());
 });
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     const keep = new Set([SHELL, APPS, FONTS]);
-    for (const k of await caches.keys()) if (!keep.has(k)) await caches.delete(k);
+    const keys = await caches.keys();
+    // Caches from the first service-worker generations (before network-first app pages) can hold app pages that
+    // need the retired SDK file; pages already open under them show "SDK failed to load". Purge and reload once.
+    const legacy = keys.some((k) => !keep.has(k) && !/^everything-(v4-|apps-v4$|fonts-v4$)/.test(k));
+    for (const k of keys) if (!keep.has(k)) await caches.delete(k);
     await self.clients.claim();
+    // Pages already open under those caches are reloaded by the hub (frames without a working engine) when this
+    // worker takes control; WindowClient.navigate() is not used because some Chrome builds close the tab instead.
+    if (legacy) for (const w of await self.clients.matchAll({ type: 'window' })) w.postMessage({ type: 'ehub-sw-upgraded', legacy: true });
   })());
 });
-self.addEventListener('message', (e) => { if (e.data === 'skipWaiting') self.skipWaiting(); });
+self.addEventListener('message', (e) => {
+  if (e.data === 'skipWaiting') self.skipWaiting();
+  else if (e.data && e.data.type === 'ehub-sw-version' && e.ports && e.ports[0]) e.ports[0].postMessage({ version: VERSION });
+});
 
 const scopeURL = new URL(self.registration.scope);
 const inShell = (url) => url.origin === scopeURL.origin && SHELL_FILES.some((f) => new URL(f, scopeURL).pathname === url.pathname);
@@ -44,6 +60,7 @@ self.addEventListener('fetch', (e) => {
   if (/fonts\.(googleapis|gstatic)\.com$/.test(url.hostname)) { e.respondWith(cacheFirst(req, FONTS)); return; }
   if (url.origin !== scopeURL.origin) return;
   if (url.pathname.startsWith(scopeURL.pathname + 'api/')) return; // the server API is never cached
+  if (url.pathname === new URL('everything-core.js', scopeURL).pathname) { e.respondWith(networkFirst(req, SHELL, false, 4000)); return; }
   if (req.mode === 'navigate' && url.pathname === scopeURL.pathname || inShell(url)) { e.respondWith(networkFirst(req, SHELL, true)); return; }
   if (url.pathname.startsWith(scopeURL.pathname + 'apps/') || url.pathname.startsWith(scopeURL.pathname + 'icons/')) {
     if (req.headers.has('range')) return; // media seeking goes straight to the network
@@ -54,16 +71,33 @@ self.addEventListener('fetch', (e) => {
 });
 
 // Network-first; app pages ignore the query (everything-items/args) when falling back to the cache.
-async function networkFirst(req, name, shell) {
+// With waitMs, a slow network answer loses to a cached copy (the fresh one still refreshes the cache).
+async function networkFirst(req, name, shell, waitMs) {
   const c = await caches.open(name);
-  const key = shell ? req : stripQuery(req.url);
-  try {
-    const res = await fetch(req);
-    if (res.ok && res.status === 200) c.put(key, res.clone()).catch(() => {});
-    return res;
-  } catch {
-    return (await c.match(key, { ignoreSearch: true })) || (shell ? await c.match('index.html') : null) || offline();
+  const key = shell || waitMs ? req : stripQuery(req.url);
+  const net = fetch(req).then((res) => { if (res.ok && res.status === 200) c.put(key, res.clone()).catch(() => {}); return res; });
+  const fallback = async () => {
+    const hit = await c.match(key, { ignoreSearch: true });
+    if (hit) return clean(hit);
+    if (req.mode === 'navigate') { const home = shell ? await c.match('./') || await c.match('index.html') : null; if (home) return clean(home); return offline(); }
+    return Response.error();
+  };
+  if (waitMs) {
+    const hit = await c.match(key, { ignoreSearch: true });
+    if (hit) {
+      const timer = new Promise((r) => setTimeout(() => r(null), waitMs));
+      const res = await Promise.race([net.catch(() => null), timer]);
+      if (res && res.status < 500) return res;
+      net.catch(() => {});
+      return clean(hit);
+    }
   }
+  try { return await net; } catch { return fallback(); }
+}
+// A navigation must never be answered with a redirected response (Chrome turns it into a network error).
+async function clean(res) {
+  if (!res || !res.redirected) return res;
+  return new Response(await res.blob(), { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 function stripQuery(u) { const x = new URL(u); x.search = ''; x.hash = ''; return x.href; }
 async function cacheFirst(req, name) {
@@ -82,3 +116,25 @@ async function staleWhileRevalidate(req, name, e) {
 function offline() {
   return new Response('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><body style="font:15px system-ui;padding:40px;color:#444">You’re offline and this part of Everything Hub hasn’t been saved on this device yet. Open it once while online to use it offline.</body>', { status: 503, headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
+
+// Push and notifications for apps (they register through the hub's worker). Payload: { title, body, app, route, tag, icon }.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data ? e.data.text() : '' }; }
+  const app = typeof d.app === 'string' ? d.app : '';
+  e.waitUntil(self.registration.showNotification(d.title || 'Everything Hub', {
+    body: d.body || '', tag: d.tag || undefined, icon: d.icon || (app ? `apps/${app}/icon-128.png` : 'icon-192.png'), badge: 'icon-192.png',
+    data: Object.assign({}, d.data || {}, { app, route: d.route || (d.data && d.data.route) || '' }),
+  }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const d = e.notification.data || {};
+  const target = new URL(d.app ? `./#/app/${encodeURIComponent(d.app)}` : './', scopeURL).href;
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const hub = wins.find((w) => w.frameType !== 'nested' && new URL(w.url).pathname === scopeURL.pathname);
+    if (hub) { try { await hub.focus(); } catch {} hub.postMessage({ type: 'ehub-notification', app: d.app, route: d.route }); return; }
+    await self.clients.openWindow(target);
+  })());
+});

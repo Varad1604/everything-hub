@@ -395,15 +395,6 @@
    ]
   },
   {
-   "id": "assets",
-   "name": "Assets",
-   "category": "Business",
-   "alternativeTo": "Asset Panda, EZOfficeInventory",
-   "aliases": [
-    "assets"
-   ]
-  },
-  {
    "id": "hiring",
    "name": "Hiring",
    "category": "Business",

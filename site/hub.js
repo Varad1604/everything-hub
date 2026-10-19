@@ -297,7 +297,8 @@
   let pendingFrom = null, pendingItems = null, pendingArgs = null;
 
   function appURL(id, items, args) {
-    let u = `apps/${encodeURIComponent(id)}/index.html`;
+    // The server answers apps/<id>/index.html with a redirect to apps/<id>/; ask for the folder directly (one round trip less on mobile).
+    let u = `apps/${encodeURIComponent(id)}/${location.protocol === 'file:' ? 'index.html' : ''}`;
     const q = [];
     if (items && items.length) q.push(`everything-items=${encodeURIComponent(JSON.stringify(items))}`);
     if (args && Object.keys(args).length) q.push(`everything-args=${encodeURIComponent(JSON.stringify(args))}`);
@@ -306,7 +307,7 @@
   async function checkBuilt(id) {
     if (built.has(id) && built.get(id) !== 'unknown') return built.get(id);
     try {
-      const r = await fetch(`apps/${encodeURIComponent(id)}/index.html`, { method: 'HEAD', cache: 'no-store' });
+      const r = await fetch(`apps/${encodeURIComponent(id)}/${location.protocol === 'file:' ? 'index.html' : ''}`, { method: 'HEAD', cache: 'no-store' });
       built.set(id, r.ok ? 'built' : r.status === 404 ? 'missing' : 'unknown');
     } catch { built.set(id, 'unknown'); }
     return built.get(id);
@@ -1040,7 +1041,17 @@
   }
 
   /* -------------------------------------------------------------- boot */
+  // App-level service workers (apps/<id>/sw.js, from earlier builds) would serve stale app pages in front of the hub's
+  // worker; drop them before any app frame opens (the engine sends their future registrations to the hub worker).
+  const swCleanup = (async () => {
+    try {
+      const sw = navigator.serviceWorker; if (!sw?.getRegistrations || location.protocol === 'file:') return;
+      const base = new URL('apps/', location.href).pathname;
+      for (const r of await sw.getRegistrations()) if (new URL(r.scope).pathname.startsWith(base)) await r.unregister().catch(() => {});
+    } catch {}
+  })();
   async function boot() {
+    await Promise.race([swCleanup, new Promise((r) => setTimeout(r, 1500))]);
     wire();
     buildSettings();
     applyTheme();
@@ -1055,11 +1066,21 @@
     renderHome();
     route();
     // Find out which apps are present, then mark the rest quietly.
-    Promise.all(APPS.map((a) => checkBuilt(a.id))).then(() => { if ([...built.values()].includes('missing')) renderCats(); });
+    // Apps that are not on this server are not offered at all (a deep link still explains it).
+    Promise.all(APPS.map((a) => checkBuilt(a.id))).then(() => { if ([...built.values()].includes('missing')) { APPS = APPS.filter((a) => built.get(a.id) !== 'missing'); renderHome(); } });
     if (!state.toured && !/^#\/app\//.test(location.hash)) setTimeout(startTour, 900);
     if ('serviceWorker' in navigator && location.protocol !== 'file:' && !/[?&]nosw\b/.test(location.search)) {
       let hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.type === 'ehub-notification' && e.data.app && byId.has(e.data.app)) go(`#/app/${e.data.app}`); });
+      // An app frame without a working engine (e.g. an old page served by a service worker from an earlier deploy)
+      // is reloaded once the current worker is in charge.
+      const reviveFrames = () => tabs.forEach((t) => {
+        const f = t.el; if (!f || f.tagName !== 'IFRAME') return;
+        try { const w = f.contentWindow; if (w && !w.ehub && w.location.pathname.includes('/apps/') && !t.revived) { t.revived = true; w.location.reload(); } } catch {}
+      });
+      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.type === 'ehub-sw-upgraded') reviveFrames(); });
       navigator.serviceWorker.addEventListener('controllerchange', () => {
+        reviveFrames();
         if (hadController) toast('Everything Hub was updated. Reload to use the new version — open apps keep running until then.', { action: { label: 'Reload', run: () => location.reload() }, timeout: 20000 });
         hadController = true;
       });

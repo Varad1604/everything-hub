@@ -20,7 +20,19 @@
   if (window.ehub && window.ehub.__everything) return;
 
   /* ------------------------------------------------------------------ basics */
-  var LS = window.localStorage;
+  var LS = window.__ehubLS || (function () {
+    // Storage can be missing or blocked (site data blocked, some in-app browsers / WebViews). Never let that stop the engine:
+    // fall back to an in-memory store for this page and tell the user their changes will not be kept.
+    try { var s0 = window.localStorage; if (s0) { s0.getItem('everything:user'); return s0; } } catch (e) {}
+    var m = Object.create(null), keys = function () { return Object.keys(m); };
+    var mem = { getItem: function (k) { k = String(k); return k in m ? m[k] : null; }, setItem: function (k, v) { m[String(k)] = String(v); }, removeItem: function (k) { delete m[String(k)]; },
+      clear: function () { keys().forEach(function (k) { delete m[k]; }); }, key: function (i) { return keys()[i] == null ? null : keys()[i]; } };
+    Object.defineProperty(mem, 'length', { get: function () { return keys().length; } });
+    window.__ehubStorageVolatile = true;
+    setTimeout(function () { try { console.warn('[everything-core] this browser blocks site storage; changes will not be kept after closing this page'); window.parent.postMessage({ everything: 1, type: 'toast', app: '', message: 'This browser is blocking site storage, so changes won\u2019t be kept after you close this page. Allow site data (cookies) for this site, or open it in Chrome/Safari.' }, location.origin); } catch (e) {} }, 0);
+    return mem;
+  })();
+  window.__ehubLS = LS;
   (function migrateLegacyKeys() {
     try {
       if (LS.getItem('everything:migrated-v2')) return;
@@ -66,10 +78,10 @@
   var USER = (function () {
     var u = null;
     try { u = JSON.parse(LS.getItem('everything:user') || 'null'); } catch (e) {}
-    if (!u || !u.uuid) {
-      u = { uuid: uuid(), created: Date.now() };
-      try { LS.setItem('everything:user', JSON.stringify(u)); } catch (e) {}
-    }
+    if (!u || !u.uuid) u = { uuid: uuid(), created: Date.now() };
+    // The identity secret is created together with the uuid (synchronously), so app frames that start at the same time
+    // all claim the uuid with the same secret; otherwise the loser of that race is locked out of its own identity.
+    if (!u.secret) { u.secret = rid(24); try { LS.setItem('everything:user', JSON.stringify(u)); } catch (e) {} }
     return {
       username: USERNAME, uuid: u.uuid, email: USERNAME + '@everything.local', email_confirmed: true,
       requires_email_confirmation: false, is_temp: false, desktop_bg_url: null, desktop_bg_color: null,
@@ -507,7 +519,8 @@
     },
     async exists(path) { try { await fs.stat(path); return true; } catch (e) { return false; } },
     // Sharing has no meaning on a single-device drive: answer as an unshared file.
-    async share(path, recipient, mode) { await fs.stat(path); return [{ uid: 'share-' + rid(6), mode: mode || 'read', path: normPath(path), holder: String(recipient || ''), pending: true, local: true }]; },
+    // Files on this drive live only in this browser; there is no per-person sharing. Fail clearly instead of pretending.
+    async share(path) { await fs.stat(path); throw err('not_supported', 'Sharing a file with another person isn\u2019t available on Everything Hub yet. Download or export a copy and send it instead.'); },
     async unshare() { return { revoked: 0 }; },
     async getShares() { return []; },
     async listShared() { return { items: [] }; },
@@ -924,8 +937,8 @@
       }
       var rec = { id: String(Date.now()).padStart(15, '0') + '-' + rid(3), app: APP, at: Date.now(), to: to, cc: [].concat(msg.cc || []), subject: msg.subject || '', text: msg.text || '', html: msg.html ? String(msg.html).slice(0, 200000) : undefined, attachments: (msg.attachments || []).map(function (a) { return { filename: a.filename, contentType: a.contentType }; }) };
       var box = outbox(); box.push(rec); try { LS.setItem(OUTBOX, JSON.stringify(box.slice(-200))); } catch (e) {}
-      post('toast', { message: 'Email kept in your Outbox — sending mail isn’t set up on this hub yet.' });
-      return { delivered: to, failed: [], suppressed: [], local: true, outbox: true, id: rec.id };
+      post('toast', { message: 'Not sent: email isn’t set up on this hub yet. A copy is in your Outbox.' });
+      return { delivered: [], failed: to, suppressed: [], local: true, outbox: true, id: rec.id, code: 'email_not_configured', message: 'Email isn’t set up on this hub yet, so nothing was sent. A copy is in your Outbox.' };
     },
     async sendTransactional(msg) { return email.send(msg); },
     async list(opts) {
@@ -1073,22 +1086,61 @@
     Server.prototype.close = function () { if (this.closed) return; this.closed = true; this.connections.forEach(function (c) { c.close('server closed'); }); this.connections.clear(); this._onClose && this._onClose(); };
     var bus = null; try { bus = new BroadcastChannel(CH); } catch (e) {}
     var servers = new Map(), dials = new Map(), serving = new Map(), RTC = { iceServers: ONLINE ? [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }] : [] };
+    // ICE servers come from the hub (/api/turn): Cloudflare TURN relays when the server has a TURN key, else STUN.
+    // Without a relay, peers behind carrier-grade or symmetric NATs (most phones on mobile data) cannot connect.
+    var iceCache = null, iceAt = 0, iceTTL = 0;
+    function iceConfig() {
+      if (!ONLINE) return Promise.resolve(RTC);
+      if (iceCache && Date.now() - iceAt < iceTTL) return iceCache;
+      iceAt = Date.now(); iceTTL = 60 * 1000;
+      iceCache = (async function () {
+        try {
+          var r = await Promise.race([apiFetch(ORIGIN + '/api/turn', { headers: { 'x-ehub-auth': AUTH_TOKEN } }), new Promise(function (_, rej) { setTimeout(function () { rej(new Error('timeout')); }, 5000); })]);
+          var j = r.ok ? await r.json() : null;
+          if (j && Array.isArray(j.iceServers) && j.iceServers.length) {
+            iceTTL = Math.max(60, Math.min(Number(j.ttl) || 3600, 86400)) * 800; // refresh at 80% of the credential lifetime
+            return { iceServers: j.iceServers };
+          }
+        } catch (e) {}
+        iceTTL = 30 * 1000;
+        return RTC;
+      })();
+      return iceCache;
+    }
+    // One signalling socket per code. It stays up (reconnecting with backoff, kept alive by pings) for as long as
+    // something still needs that code: a room we serve, or a connection being set up / alive on it. A host whose
+    // socket silently died could not be reached by anyone joining later.
     var sockets = new Map();
+    function sigWanted(code) {
+      var sv = servers.get(code); if (sv && !sv.closed) return true;
+      var want = false;
+      connCode.forEach(function (c, id) { if (c === code && ((dials.get(id) && !dials.get(id).conn.closed) || (serving.get(id) && !(serving.get(id).conn && serving.get(id).conn.closed)))) want = true; });
+      return want;
+    }
+    function sigOpen(code, rec) {
+      if (rec.timer) { clearTimeout(rec.timer); rec.timer = null; }
+      var ws;
+      try { ws = new NWS(ORIGIN.replace(/^http/, 'ws') + '/api/peer/' + encodeURIComponent(code)); } catch (e) { return; }
+      rec.ws = ws;
+      ws.onopen = function () { rec.tries = 0; var q = rec.q.splice(0); q.forEach(function (m) { try { ws.send(m); } catch (e) {} }); clearInterval(rec.ping); rec.ping = setInterval(function () { try { ws.readyState === 1 && ws.send('{"t":"ping"}'); } catch (e) {} }, 25000); };
+      ws.onmessage = function (e) { var m; try { m = JSON.parse(e.data); } catch (x) { return; } if (m && (m.t === 'ping' || m.t === 'pong')) return; handle(m); };
+      ws.onclose = function () {
+        clearInterval(rec.ping); if (rec.ws === ws) rec.ws = null;
+        if (sockets.get(code) !== rec) return;
+        if (!sigWanted(code)) { sockets.delete(code); return; }
+        rec.timer = setTimeout(function () { if (sockets.get(code) === rec && !rec.ws) sigOpen(code, rec); }, Math.min(15000, 400 * Math.pow(2, rec.tries++)));
+      };
+    }
     function sig(code) {
       code = String(code); if (!ONLINE || typeof WebSocket === 'undefined') return null;
       var rec = sockets.get(code); if (rec) return rec;
-      rec = { q: [], ws: null, users: 0 };
-      try {
-        var ws = new NWS(ORIGIN.replace(/^http/, 'ws') + '/api/peer/' + encodeURIComponent(code));
-        rec.ws = ws;
-        ws.onopen = function () { var q = rec.q.splice(0); q.forEach(function (m) { ws.send(m); }); };
-        ws.onmessage = function (e) { var m; try { m = JSON.parse(e.data); } catch (x) { return; } handle(m); };
-        ws.onclose = function () { if (sockets.get(code) === rec) sockets.delete(code); };
-      } catch (e) { return null; }
-      sockets.set(code, rec); return rec;
+      rec = { q: [], ws: null, tries: 0, timer: null, ping: null };
+      sockets.set(code, rec); sigOpen(code, rec); return rec;
     }
-    function sigSend(code, msg) { var r = sig(code); if (!r) return; var d = JSON.stringify(msg); if (r.ws && r.ws.readyState === 1) r.ws.send(d); else r.q.push(d); }
-    function sigClose(code) { var r = sockets.get(String(code)); if (r) { sockets.delete(String(code)); try { r.ws.close(); } catch (e) {} } }
+    function sigSend(code, msg) { var r = sig(code); if (!r) return; var d = JSON.stringify(msg); if (r.ws && r.ws.readyState === 1) r.ws.send(d); else { r.q.push(d); if (r.q.length > 200) r.q.shift(); if (!r.ws && !r.timer) sigOpen(code, r); } }
+    function sigClose(code) { var r = sockets.get(String(code)); if (r) { sockets.delete(String(code)); clearInterval(r.ping); clearTimeout(r.timer); try { r.ws && r.ws.close(); } catch (e) {} } }
+    function sigRevive() { sockets.forEach(function (r, code) { if ((!r.ws || r.ws.readyState > 1) && sigWanted(code)) { r.tries = 0; r.ws = null; sigOpen(code, r); } }); }
+    try { document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') sigRevive(); }); window.addEventListener('online', sigRevive); } catch (e) {}
     var connCode = new Map();
     function postBus(msg) {
       try { bus && bus.postMessage(msg); } catch (e) {}
@@ -1102,8 +1154,10 @@
       if (!msg || typeof msg !== 'object') return;
       if (msg.t === 'dial') {
         var srv = servers.get(msg.code); if (!srv || srv.closed || serving.has(msg.connId)) return;
-        var pc = new RTCPeerConnection(RTC), conn = new Conn(pc, { owner: Object.assign({}, me), room: /^[a-z]/.test(msg.code) ? msg.code : undefined });
-        var rec = { pc: pc, conn: conn, queued: [] }; serving.set(msg.connId, rec); connCode.set(msg.connId, msg.code);
+        var pend = { pc: { remoteDescription: null }, conn: null, queued: [] }; serving.set(msg.connId, pend); connCode.set(msg.connId, msg.code);
+        var cfg = await iceConfig(); if (srv.closed || serving.get(msg.connId) !== pend) { if (serving.get(msg.connId) === pend) serving.delete(msg.connId); return; }
+        var pc = new RTCPeerConnection(cfg), conn = new Conn(pc, { owner: Object.assign({}, me), room: /^[a-z]/.test(msg.code) ? msg.code : undefined });
+        var rec = pend; rec.pc = pc; rec.conn = conn; serving.set(msg.connId, rec); connCode.set(msg.connId, msg.code);
         pc.ondatachannel = function (e) { conn.attach(e.channel); };
         pc.onicecandidate = function (e) { postBus({ t: 'ice', connId: msg.connId, to: 'dialer', candidate: e.candidate ? e.candidate.toJSON() : null }); };
         conn.addEventListener('close', function () { serving.delete(msg.connId); srv.connections.delete(msg.connId); });
@@ -1129,12 +1183,12 @@
         if (opts.name !== undefined && !/^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])?$/.test(String(opts.name))) throw new TypeError('Not a valid room name');
         var code = opts.name || ('EV-' + rand());
         var old = servers.get(code); if (old) old.close();
-        var s = new Server(code); s._onClose = function () { if (servers.get(code) === s) servers.delete(code); sigClose(code); }; sig(code);
+        var s = new Server(code); s._onClose = function () { if (servers.get(code) === s) servers.delete(code); sigClose(code); }; sig(code); iceConfig();
         servers.set(code, s); return s;
       },
-      async connect(code) {
+      async connect(code, opts) {
         if (typeof RTCPeerConnection === 'undefined') throw err('not_supported', 'Peer connections are not available in this browser');
-        var pc = new RTCPeerConnection(RTC), connId = rand(8);
+        var pc = new RTCPeerConnection(await iceConfig()), connId = rand(8);
         var conn = new Conn(pc, { owner: null, room: /^[a-z]/.test(String(code)) ? code : undefined });
         conn.attach(pc.createDataChannel('everything'));
         var rec = { pc: pc, conn: conn, queued: [], answered: false, timer: null }; dials.set(connId, rec); connCode.set(connId, String(code));
@@ -1142,7 +1196,7 @@
         pc.onicecandidate = function (e) { postBus({ t: 'ice', connId: connId, to: 'server', candidate: e.candidate ? e.candidate.toJSON() : null }); };
         await pc.setLocalDescription(await pc.createOffer());
         rec.timer = setTimeout(function () { if (rec.answered || conn.closed) return; var e = err('invalid_invite', 'No one is hosting that code right now. Check the code and that the host still has the app open.'); conn._fire('error', { error: e }); conn.close('invalid_invite'); }, NO_HOST_MS);
-        postBus({ t: 'dial', code: String(code), connId: connId, from: { uuid: me.uuid, username: me.username }, offer: pc.localDescription.toJSON() });
+        postBus({ t: 'dial', code: String(code), connId: connId, from: { uuid: (opts && typeof opts.anonToken === 'string' && opts.anonToken) || me.uuid, username: me.username }, offer: pc.localDescription.toJSON() });
         return conn;
       },
       async ensureTurnRelays() {}, async createGuestGrant() { return { grant: 'local-grant', expiresAt: nowSec() + 3600 }; },
@@ -1388,7 +1442,8 @@
     getLanguage: function () { return Promise.resolve((navigator.language || 'en').split('-')[0]); },
     requestPermission: function () { return Promise.resolve(true); },
     authenticateWithEhub: function () { return Promise.resolve(Object.assign({}, USER)); },
-    showFeedbackDialog: function () { return Promise.resolve(); },
+    // No feedback channel exists: left undefined so apps that feature-detect it hide their Feedback entry.
+    showFeedbackDialog: undefined,
     socialShare: function (url) { try { if (navigator.share) return navigator.share({ url: url }); } catch (e) {} return Promise.resolve(); },
     notify: function (o) { post('toast', { message: typeof o === 'string' ? o : (o && (o.text || o.title)) || '' }); return Promise.resolve(); },
     exit: function () { return ehubObj.exit(); },
@@ -1550,6 +1605,30 @@
   window.__ehubCore = { app: APP, user: USER, normPath: normPath, db: db, aiConfig: aiConfig };
 
   /* Hub shortcuts from inside an app: Cmd/Ctrl+K and Cmd/Ctrl+1..9, unless the app handled them. */
+  /* Service workers: the hub's own worker (at the site root) caches every app. App-level workers (apps/<id>/sw.js)
+     would sit in front of it with their own, older caches and serve stale pages, so registering one goes to the hub
+     worker instead (push, notifications and offline keep working through it) and leftovers from earlier builds go away. */
+  (function () {
+    var sw = navigator.serviceWorker; if (!sw || !sw.register || !/^https?:$/.test(location.protocol)) return;
+    var m = /^(.*?\/)apps\/[^/]+\//.exec(location.pathname); if (!m) return;
+    var root = m[1], nreg = sw.register.bind(sw);
+    var isAppScope = function (scope) { try { return new URL(scope).pathname.indexOf(root + 'apps/') === 0; } catch (e) { return false; } };
+    try {
+      sw.register = function (url, opts) {
+        var u = parseU(url);
+        if (u && u.origin === location.origin && u.pathname !== root + 'sw.js') return nreg(root + 'sw.js', { scope: root });
+        return nreg(url, opts);
+      };
+    } catch (e) {}
+    function parseU(u) { try { return new URL(String(u), location.href); } catch (e) { return null; } }
+    if (sw.getRegistrations) sw.getRegistrations().then(function (regs) {
+      var mine = false;
+      regs.forEach(function (r) { if (isAppScope(r.scope)) { if (sw.controller && r.active && sw.controller.scriptURL === r.active.scriptURL) mine = true; r.unregister().catch(function () {}); } });
+      // This page itself came from an app-level worker: load it once more from the hub worker / network.
+      if (mine) { var k = 'everything:sw-cleanup:' + location.pathname; try { if (!sessionStorage.getItem(k)) { sessionStorage.setItem(k, '1'); location.reload(); } } catch (e) {} }
+    }).catch(function () {});
+  })();
+
   if (IN_FRAME) window.addEventListener('keydown', function (e) {
     var mod = /Mac|iPhone|iPad/.test(navigator.platform || '') ? e.metaKey : e.ctrlKey;
     if (!mod || e.altKey || e.shiftKey || e.defaultPrevented) return;
