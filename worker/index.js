@@ -4,7 +4,8 @@
 //   /api/ai/...                      OpenAI-compatible chat, images, transcription, speech on Workers AI (binding AI)
 //   /api/fetch                       CORS-free proxy for ehub.net.fetch (target in x-ehub-target)
 //   /api/email/send                  outbound mail through Resend when RESEND_API_KEY is set
-//   /api/peer/<code>                 WebSocket signalling room for ehub.peer (Durable Object PeerRoom)
+//   /api/peer/<code>                 WebSocket signalling room for ehub.peer (Durable Object PeerRoom); also the
+//                                    server relay (data + WebCodecs media) when no direct WebRTC path exists
 //   /api/turn                        ICE servers for ehub.peer: Cloudflare Realtime TURN when CF_TURN_KEY_ID + CF_TURN_KEY_API_TOKEN are set, else STUN
 //   /api/w/<app>/<instance>/<path>   an app's team server (Durable Object AppServer runs the app's own script)
 //   /api/site/<name>[/f/<path>]      publish a drive folder (ehub.hosting); served publicly at /s/<name>/<path>
@@ -273,6 +274,8 @@ async function turnServers(request, env, ip) {
 }
 
 /* ------------------------------------------------------------ peer signalling */
+// Relay budgets: one relayed camera+mic stream is ~60-80 KB/s; a host relaying to several guests sends one per guest.
+const PEER_MSGS_PER_SEC = 200, PEER_BYTES_PER_SEC = 640 * 1024, PEER_ROOM_BYTES_PER_SEC = 2.5 * 1024 * 1024;
 export class PeerRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -281,13 +284,42 @@ export class PeerRoom extends DurableObject {
   }
   async fetch(request) {
     if (this.ctx.getWebSockets().length >= 48) return new Response('Room is full', { status: 429 });
+    // ?sid=<random id the engine keeps for this page>: lets relayed traffic be addressed to one socket.
+    let sid = '';
+    try { sid = (new URL(request.url).searchParams.get('sid') || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 24); } catch {}
     const pair = new WebSocketPair();
-    this.ctx.acceptWebSocket(pair[1]);
+    this.ctx.acceptWebSocket(pair[1], sid ? ['s:' + sid] : []);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
+  // Per-socket and per-room budgets for relayed traffic (in memory; reset if the object is evicted, which is fine).
+  allow(ws, bytes) {
+    const now = Date.now();
+    if (!this.rate) this.rate = new WeakMap();
+    if (!this.room || now - this.room.t >= 1000) this.room = { t: now, b: 0 };
+    let r = this.rate.get(ws);
+    if (!r || now - r.t >= 1000) { r = { t: now, b: 0, n: 0 }; this.rate.set(ws, r); }
+    r.n++; r.b += bytes; this.room.b += bytes;
+    return r.n <= PEER_MSGS_PER_SEC && r.b <= PEER_BYTES_PER_SEC && this.room.b <= PEER_ROOM_BYTES_PER_SEC;
+  }
   async webSocketMessage(ws, msg) {
-    if (typeof msg !== 'string' || msg.length > 65536) return;
-    for (const other of this.ctx.getWebSockets()) if (other !== ws) { try { other.send(msg); } catch {} }
+    if (typeof msg === 'string') {
+      if (msg.length > 262144 || !this.allow(ws, msg.length)) return;
+      // Messages addressed to one socket ("dst") go only there; everything else (dial/answer/ice) is broadcast.
+      let dst = null;
+      if (msg.indexOf('"dst":"') >= 0) { try { const m = JSON.parse(msg); if (m && typeof m.dst === 'string') dst = m.dst.replace(/[^A-Za-z0-9]/g, '').slice(0, 24); } catch {} }
+      const targets = dst ? this.ctx.getWebSockets('s:' + dst) : this.ctx.getWebSockets();
+      for (const other of targets) if (other !== ws) { try { other.send(msg); } catch {} }
+      return;
+    }
+    // Binary: relayed media, [0xE1][sid length][sid][payload], forwarded untouched to that socket.
+    const u = new Uint8Array(msg);
+    if (u.length < 4 || u[0] !== 0xE1 || u.length > 1048576) return;
+    const n = u[1];
+    if (!n || n > 24 || u.length < 2 + n) return;
+    let sid = '';
+    for (let i = 2; i < 2 + n; i++) sid += String.fromCharCode(u[i]);
+    if (/[^A-Za-z0-9]/.test(sid) || !this.allow(ws, u.length)) return;
+    for (const other of this.ctx.getWebSockets('s:' + sid)) if (other !== ws) { try { other.send(msg); } catch {} }
   }
   async webSocketClose(ws, code) { try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch {} }
   async webSocketError(ws) { try { ws.close(1011, 'error'); } catch {} }

@@ -1067,18 +1067,22 @@
       this.peerconnection = pc; this.owner = o && o.owner || null; this.room = o && o.room; this.connected = false; this.closed = false; this._dc = null;
       var fire = function (type, props) { var e = ev(type, props); self.dispatchEvent(e); var h = self['on' + type]; if (typeof h === 'function') h(e); };
       this._fire = fire;
-      pc.addEventListener('connectionstatechange', function () { if ((pc.connectionState === 'failed' || pc.connectionState === 'closed') && !self.closed) self._closed('connection ' + pc.connectionState); });
+      pc.addEventListener('connectionstatechange', function () {
+        if (self._relay || self.closed || self.peerconnection !== pc) return;
+        if (pc.connectionState === 'failed' && !self.connected && self._preFail) { var pf = self._preFail; self._preFail = null; pf(); return; }
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed') self._closed('connection ' + pc.connectionState);
+      });
     }
     Conn.prototype.attach = function (dc) {
       var self = this; this._dc = dc;
       dc.onopen = function () { if (self.closed) return; self.connected = true; self._fire('open'); };
       dc.onmessage = function (e) { self._fire('message', { data: e.data }); };
-      dc.onclose = function () { self._closed('channel closed'); };
+      dc.onclose = function () { if (!self._relay) self._closed('channel closed'); };
       if (dc.readyState === 'open') dc.onopen();
     };
-    Conn.prototype.send = function (d) { if (!this.connected || !this._dc || this._dc.readyState !== 'open') throw new Error('Connection is not open'); this._dc.send(d); };
-    Conn.prototype.close = function (reason) { if (this.closed) return; this.closed = true; this.connected = false; try { this._dc && this._dc.close(); } catch (e) {} try { this.peerconnection.close(); } catch (e) {} this._fire('close', { reason: reason }); };
-    Conn.prototype._closed = function (reason) { if (this.closed) return; this.closed = true; this.connected = false; try { this.peerconnection.close(); } catch (e) {} this._fire('close', { reason: reason }); };
+    Conn.prototype.send = function (d) { if (this._relay) return relayConnSend(this, d); if (!this.connected || !this._dc || this._dc.readyState !== 'open') throw new Error('Connection is not open'); this._dc.send(d); };
+    Conn.prototype.close = function (reason) { if (this.closed) return; if (this._relay) { try { relaySend(this, { t: 'rbye' }); } catch (e) {} } this.closed = true; this.connected = false; if (this._relay) relayEnd(this); try { this._dc && this._dc.close(); } catch (e) {} try { this.peerconnection.close(); } catch (e) {} this._fire('close', { reason: reason }); };
+    Conn.prototype._closed = function (reason) { if (this.closed) return; this.closed = true; this.connected = false; if (this._relay) relayEnd(this); try { this.peerconnection.close(); } catch (e) {} this._fire('close', { reason: reason }); };
     Conn.prototype.on = function (t, fn) { this.addEventListener(t, fn); return this; };
     function Server(code) { var t = new EventTarget(), self = this; ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach(function (m) { self[m] = t[m].bind(t); }); this.inviteCode = code; this.name = code; this.connections = new Map(); this.closed = false; }
     Server.prototype.setGuestGrant = function () {};
@@ -1120,10 +1124,10 @@
     function sigOpen(code, rec) {
       if (rec.timer) { clearTimeout(rec.timer); rec.timer = null; }
       var ws;
-      try { ws = new NWS(ORIGIN.replace(/^http/, 'ws') + '/api/peer/' + encodeURIComponent(code)); } catch (e) { return; }
+      try { ws = new NWS(ORIGIN.replace(/^http/, 'ws') + '/api/peer/' + encodeURIComponent(code) + '?sid=' + rec.sid); ws.binaryType = 'arraybuffer'; } catch (e) { return; }
       rec.ws = ws;
       ws.onopen = function () { rec.tries = 0; var q = rec.q.splice(0); q.forEach(function (m) { try { ws.send(m); } catch (e) {} }); clearInterval(rec.ping); rec.ping = setInterval(function () { try { ws.readyState === 1 && ws.send('{"t":"ping"}'); } catch (e) {} }, 25000); };
-      ws.onmessage = function (e) { var m; try { m = JSON.parse(e.data); } catch (x) { return; } if (m && (m.t === 'ping' || m.t === 'pong')) return; handle(m); };
+      ws.onmessage = function (e) { if (typeof e.data !== 'string') { relayBinary(e.data); return; } var m; try { m = JSON.parse(e.data); } catch (x) { return; } if (m && (m.t === 'ping' || m.t === 'pong')) return; handle(m); };
       ws.onclose = function () {
         clearInterval(rec.ping); if (rec.ws === ws) rec.ws = null;
         if (sockets.get(code) !== rec) return;
@@ -1134,7 +1138,7 @@
     function sig(code) {
       code = String(code); if (!ONLINE || typeof WebSocket === 'undefined') return null;
       var rec = sockets.get(code); if (rec) return rec;
-      rec = { q: [], ws: null, tries: 0, timer: null, ping: null };
+      rec = { q: [], ws: null, tries: 0, timer: null, ping: null, sid: rand(12) };
       sockets.set(code, rec); sigOpen(code, rec); return rec;
     }
     function sigSend(code, msg) { var r = sig(code); if (!r) return; var d = JSON.stringify(msg); if (r.ws && r.ws.readyState === 1) r.ws.send(d); else { r.q.push(d); if (r.q.length > 200) r.q.shift(); if (!r.ws && !r.timer) sigOpen(code, r); } }
@@ -1152,6 +1156,7 @@
     async function flush(rec) { var q = rec.queued.splice(0); for (var i = 0; i < q.length; i++) await feed(rec, q[i]); }
     async function handle(msg) {
       if (!msg || typeof msg !== 'object') return;
+      if (/^(relay|relay-ok|rd|rhb|rbye|rctl)$/.test(msg.t)) { if (msg.dst) relayHandle(msg); return; }
       if (msg.t === 'dial') {
         var srv = servers.get(msg.code); if (!srv || srv.closed || serving.has(msg.connId)) return;
         var pend = { pc: { remoteDescription: null }, conn: null, queued: [] }; serving.set(msg.connId, pend); connCode.set(msg.connId, msg.code);
@@ -1159,11 +1164,12 @@
         var pc = new RTCPeerConnection(cfg), conn = new Conn(pc, { owner: Object.assign({}, me), room: /^[a-z]/.test(msg.code) ? msg.code : undefined });
         var rec = pend; rec.pc = pc; rec.conn = conn; serving.set(msg.connId, rec); connCode.set(msg.connId, msg.code);
         pc.ondatachannel = function (e) { conn.attach(e.channel); };
+        conn._preFail = function () { setTimeout(function () { if (!conn._relay && !conn.connected && !conn.closed) conn._closed('connection failed'); }, RELAY_OK_MS + 6000); };
         pc.onicecandidate = function (e) { postBus({ t: 'ice', connId: msg.connId, to: 'dialer', candidate: e.candidate ? e.candidate.toJSON() : null }); };
         conn.addEventListener('close', function () { serving.delete(msg.connId); srv.connections.delete(msg.connId); });
         try { await pc.setRemoteDescription(msg.offer); await pc.setLocalDescription(await pc.createAnswer()); } catch (e) { conn.close('bad offer'); return; }
         srv.connections.set(msg.connId, conn);
-        postBus({ t: 'answer', connId: msg.connId, answer: pc.localDescription.toJSON(), owner: Object.assign({}, me) });
+        postBus({ t: 'answer', connId: msg.connId, answer: pc.localDescription.toJSON(), owner: Object.assign({}, me), sid: (sig(msg.code) || {}).sid });
         await flush(rec);
         var ce = ev('connection', { conn: conn, user: msg.from ? Object.assign({}, msg.from) : undefined });
         srv.dispatchEvent(ce); if (typeof srv.onconnection === 'function') srv.onconnection(ce);
@@ -1171,11 +1177,393 @@
       }
       if (msg.t === 'answer') {
         var r = dials.get(msg.connId); if (!r || r.answered) return;
-        r.answered = true; clearTimeout(r.timer); r.conn.owner = msg.owner || null;
+        r.answered = true; clearTimeout(r.timer); r.conn.owner = msg.owner || null; r.peerSid = msg.sid ? String(msg.sid) : null;
+        if (r.peerSid && ONLINE) { var rid0 = msg.connId; r.relayT = setTimeout(function () { startRelay(rid0); }, RELAY_AFTER_MS); r.conn._preFail = function () { startRelay(rid0); }; }
         try { await r.pc.setRemoteDescription(msg.answer); } catch (e) { r.conn.close('bad answer'); return; }
         await flush(r); return;
       }
       if (msg.t === 'ice') { var rr = msg.to === 'dialer' ? dials.get(msg.connId) : serving.get(msg.connId); if (rr) await feed(rr, msg.candidate); }
+    }
+    /* ---- server relay fallback ----------------------------------------------------------------------------
+     * When no direct WebRTC path comes up (no candidate pair within RELAY_AFTER_MS of the answer, or ICE fails),
+     * the dialer asks the far side to carry the connection over the signalling socket instead; the hub's PeerRoom
+     * Durable Object forwards it to that one socket. A relayed connection looks like a normal one to the app:
+     * it fires 'open', send()/'message' work, and it gets publish()/unpublish()/configure() plus 'media' /
+     * 'mediaended' / 'linkstate' events, with camera/mic encoded by WebCodecs (VP8 + Opus) and decoded into
+     * MediaStreams on the far side. Direct WebRTC stays the first choice; nothing here runs on a direct link. */
+    var RELAY_AFTER_MS = 8000, RELAY_OK_MS = 7000, RELAY_HB_MS = 4000, RELAY_DEAD_MS = 16000;
+    var relayed = new Map(); // '<my side>:<connId>' -> conn
+    var relayStats = { txV: 0, txA: 0, rxV: 0, rxA: 0, outV: 0, outA: 0, bytesOut: 0, bytesIn: 0, dropped: 0 };
+    try { window.__ehubRelayStats = relayStats; } catch (e) {}
+    var TE = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null, TD = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
+    function abToB64(u8) { var s = '', C = 0x8000; for (var i = 0; i < u8.length; i += C) s += String.fromCharCode.apply(null, u8.subarray(i, i + C)); return btoa(s); }
+    function b64ToAb(b) { var s = atob(b), u = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }
+    function relayPC() {
+      var t = new EventTarget();
+      return { relayed: true, connectionState: 'connected', iceConnectionState: 'connected', signalingState: 'stable', iceGatheringState: 'complete',
+        remoteDescription: { type: 'answer', sdp: '' }, localDescription: { type: 'offer', sdp: '' },
+        addEventListener: t.addEventListener.bind(t), removeEventListener: t.removeEventListener.bind(t), dispatchEvent: t.dispatchEvent.bind(t),
+        close: function () { this.connectionState = 'closed'; this.iceConnectionState = 'closed'; this.signalingState = 'closed'; },
+        getStats: function () { return Promise.resolve(new Map()); }, getSenders: function () { return []; }, getReceivers: function () { return []; }, getTransceivers: function () { return []; } };
+    }
+    function relaySend(conn, obj) { var R = conn._relay; if (!R) return; obj.c = R.id; obj.to = R.to; obj.dst = R.sid; sigSend(R.code, obj); }
+    function relayBadge() {
+      var n = 0; relayed.forEach(function (c) { if (!c.closed) n++; });
+      try {
+        var el = document.getElementById('ehub-relay-badge');
+        if (!n) { if (el) el.remove(); return; }
+        if (!el) {
+          el = document.createElement('div'); el.id = 'ehub-relay-badge'; el.setAttribute('role', 'status');
+          el.title = 'No direct connection could be made from this network, so audio, video and messages go through the Everything Hub server. Quality is reduced.';
+          el.style.cssText = 'position:fixed;left:8px;top:max(8px,env(safe-area-inset-top));z-index:2147483646;padding:2px 9px;border-radius:999px;background:rgba(20,20,24,.72);color:#fff;font:600 11px/1.7 system-ui,-apple-system,sans-serif;pointer-events:none;letter-spacing:.2px;opacity:.9';
+          (document.body || document.documentElement).appendChild(el);
+        }
+        el.textContent = 'Relayed via server';
+      } catch (e) {}
+    }
+    function goRelay(conn, code, connId, side, peerSid) {
+      if (conn.closed || conn._relay) return;
+      var R = conn._relay = { code: String(code), id: connId, side: side, to: side === 'dialer' ? 'server' : 'dialer', sid: peerSid, last: Date.now(), out: [], outBytes: 0, flushT: null, slots: new Map(), remote: new Map(), unstable: false };
+      relayed.set(side + ':' + connId, conn);
+      try { if (conn._dc) { conn._dc.onopen = null; conn._dc.onmessage = null; conn._dc.onclose = null; } } catch (e) {}
+      var pc = conn.peerconnection; conn.peerconnection = relayPC(); conn.relayed = true;
+      try { pc.close(); } catch (e) {}
+      R.hb = setInterval(function () {
+        if (conn.closed) { clearInterval(R.hb); return; }
+        var idle = Date.now() - R.last;
+        if (idle > RELAY_DEAD_MS) { conn._closed('channel closed'); return; }
+        if (idle > RELAY_HB_MS * 2 + 500 && !R.unstable) { R.unstable = true; conn._fire('linkstate', { state: 'unstable' }); }
+        relaySend(conn, { t: 'rhb' });
+        R.slots.forEach(function (slot, name) { syncSlot(conn, name); });
+      }, RELAY_HB_MS);
+      installRelayMedia(conn);
+      relayBadge();
+      try { console.warn('[ehub.peer] no direct path to the other side; relaying through the server (' + side + ')'); } catch (e) {}
+      if (!conn.connected) { conn.connected = true; conn._fire('open'); }
+      conn._fire('linkstate', { state: 'connected' });
+    }
+    function relayEnd(conn) {
+      var R = conn._relay; if (!R || R.ended) return; R.ended = true;
+      clearInterval(R.hb); clearTimeout(R.flushT);
+      R.slots.forEach(function (slot) { slot.tx.forEach(function (p) { try { p.stop(); } catch (e) {} }); });
+      R.remote.forEach(function (rm) { endRemote(rm); });
+      relayed.delete(R.side + ':' + R.id);
+      relayBadge();
+    }
+    // dialer: no direct path -> ask the server side to relay
+    function startRelay(connId) {
+      var r = dials.get(connId); if (!r || r.conn.closed || r.conn.connected || r.relayWait || r.conn._relay) return;
+      var code = connCode.get(connId), me = code ? sig(code) : null;
+      if (!ONLINE || !r.peerSid || !me) return;
+      r.relayWait = setTimeout(function () {
+        r.relayWait = null;
+        // No relay either: close without a reason, i.e. "this network could not reach the other side".
+        if (!r.conn.connected && !r.conn.closed) { try { console.warn('[ehub.peer] no direct path and the server relay did not answer'); } catch (e) {} r.conn._closed(); }
+      }, RELAY_OK_MS);
+      sigSend(code, { t: 'relay', c: connId, to: 'server', dst: r.peerSid, sid: me.sid });
+    }
+    function relayHandle(msg) {
+      if (msg.t === 'relay') {
+        var sv = serving.get(msg.c); if (!sv || !sv.conn || sv.conn.closed || !msg.sid) return;
+        var code = connCode.get(msg.c), me = sig(code); if (!me) return;
+        if (!sv.conn._relay) goRelay(sv.conn, code, msg.c, 'server', String(msg.sid)); else sv.conn._relay.sid = String(msg.sid);
+        relaySend(sv.conn, { t: 'relay-ok', sid: me.sid });
+        return;
+      }
+      if (msg.t === 'relay-ok') {
+        var d = dials.get(msg.c); if (!d || d.conn.closed || msg.to !== 'dialer') return;
+        if (d.conn._relay) { d.conn._relay.last = Date.now(); return; }
+        if (!d.relayWait) return;
+        clearTimeout(d.relayWait); d.relayWait = null; clearTimeout(d.relayT);
+        goRelay(d.conn, connCode.get(msg.c), msg.c, 'dialer', String(msg.sid || d.peerSid));
+        return;
+      }
+      var conn = relayed.get(msg.to + ':' + msg.c); if (!conn || conn.closed) return;
+      var R = conn._relay; R.last = Date.now();
+      if (R.unstable) { R.unstable = false; conn._fire('linkstate', { state: 'connected' }); }
+      if (msg.t === 'rd') conn._fire('message', { data: msg.b != null ? b64ToAb(msg.b) : msg.d });
+      else if (msg.t === 'rbye') conn._closed('channel closed');
+      else if (msg.t === 'rctl') {
+        if (msg.op === 'key') { var sl = R.slots.get(String(msg.name)); var vp = sl && sl.tx.get('video'); if (vp && vp.key) vp.key(); }
+        else if (msg.op === 'unpub') { var rm = R.remote.get(String(msg.name)); if (rm) { endRemote(rm); R.remote.delete(String(msg.name)); conn._fire('mediaended', { name: String(msg.name) }); } }
+      }
+    }
+    function relayConnSend(conn, d) {
+      if (conn.closed) throw new Error('Connection is not open');
+      if (typeof d === 'string') { relaySend(conn, { t: 'rd', d: d }); return; }
+      if (d instanceof ArrayBuffer) { relaySend(conn, { t: 'rd', b: abToB64(new Uint8Array(d)) }); return; }
+      if (ArrayBuffer.isView(d)) { relaySend(conn, { t: 'rd', b: abToB64(new Uint8Array(d.buffer, d.byteOffset, d.byteLength)) }); return; }
+      if (typeof Blob !== 'undefined' && d instanceof Blob) { d.arrayBuffer().then(function (ab) { if (!conn.closed) relaySend(conn, { t: 'rd', b: abToB64(new Uint8Array(ab)) }); }); return; }
+      relaySend(conn, { t: 'rd', d: String(d) });
+    }
+
+    /* -- media over the relay -- */
+    var HAS_WC = typeof VideoEncoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined';
+    var HAS_AC = typeof AudioEncoder !== 'undefined' && typeof EncodedAudioChunk !== 'undefined';
+    function installRelayMedia(conn) {
+      var R = conn._relay;
+      conn.publish = function (name, stream, opts) {
+        if (conn.closed || !stream) return;
+        var slot = R.slots.get(name);
+        if (!slot) { slot = { tx: new Map() }; R.slots.set(name, slot); }
+        slot.stream = stream;
+        slot.screen = name === 'screen' || !!(opts && opts.video && opts.video.degradationPreference === 'maintain-resolution');
+        syncSlot(conn, name);
+        relaySend(conn, { t: 'rctl', op: 'pub', name: name });
+      };
+      conn.unpublish = function (name) {
+        var slot = R.slots.get(name); if (!slot) return;
+        slot.tx.forEach(function (p) { p.stop(); }); R.slots.delete(name);
+        relaySend(conn, { t: 'rctl', op: 'unpub', name: name });
+      };
+      conn.configure = function () {};
+    }
+    function syncSlot(conn, name) {
+      var slot = conn._relay && conn._relay.slots.get(name); if (!slot || !slot.stream) return;
+      var kinds = {};
+      slot.stream.getTracks().forEach(function (tr) {
+        if (tr.readyState === 'ended') return;
+        kinds[tr.kind] = 1;
+        var p = slot.tx.get(tr.kind);
+        if (p && p.track === tr && !p.stopped) return;
+        if (p) p.stop();
+        var np = tr.kind === 'video' ? txVideo(conn, name, tr, slot.screen) : txAudio(conn, name, tr);
+        if (np) slot.tx.set(tr.kind, np); else slot.tx.delete(tr.kind);
+      });
+      slot.tx.forEach(function (p, k) { if (!kinds[k]) { p.stop(); slot.tx.delete(k); } });
+    }
+    function relaySocket(conn) { var r = conn._relay && sockets.get(conn._relay.code); return r && r.ws && r.ws.readyState === 1 ? r.ws : null; }
+    function relayBusy(conn) { var ws = relaySocket(conn); return !ws || ws.bufferedAmount > 384 * 1024; }
+    function queueFrame(conn, h, bytes) {
+      var R = conn._relay; if (!R || conn.closed) return;
+      R.out.push([h, bytes]); R.outBytes += bytes.length;
+      if (R.outBytes > 192 * 1024) flushFrames(conn);
+      else if (!R.flushT) R.flushT = setTimeout(function () { flushFrames(conn); }, 45);
+    }
+    function flushFrames(conn) {
+      var R = conn._relay; if (!R) return;
+      clearTimeout(R.flushT); R.flushT = null;
+      var items = R.out.splice(0); R.outBytes = 0;
+      if (!items.length || conn.closed || !TE) return;
+      var ws = relaySocket(conn);
+      if (!ws) { relayStats.dropped += items.length; return; }
+      var sidB = TE.encode(R.sid), meta = TE.encode(JSON.stringify({ c: R.id, to: R.to }));
+      var parts = [], total = 2 + sidB.length + 2 + meta.length;
+      items.forEach(function (it) { var hb = TE.encode(JSON.stringify(it[0])); parts.push(hb, it[1]); total += 2 + hb.length + 4 + it[1].length; });
+      if (total > 900 * 1024) { relayStats.dropped += items.length; return; }
+      var out = new Uint8Array(total), dv = new DataView(out.buffer), o = 0;
+      out[o++] = 0xE1; out[o++] = sidB.length; out.set(sidB, o); o += sidB.length;
+      dv.setUint16(o, meta.length); o += 2; out.set(meta, o); o += meta.length;
+      for (var i = 0; i < parts.length; i += 2) {
+        dv.setUint16(o, parts[i].length); o += 2; out.set(parts[i], o); o += parts[i].length;
+        dv.setUint32(o, parts[i + 1].length); o += 4; out.set(parts[i + 1], o); o += parts[i + 1].length;
+      }
+      try { ws.send(out.buffer); relayStats.bytesOut += total; } catch (e) { relayStats.dropped += items.length; }
+    }
+    function relayBinary(buf) {
+      if (!TD) return;
+      try {
+        var u = new Uint8Array(buf), dv = new DataView(buf), o = 0;
+        if (u[o++] !== 0xE1) return;
+        o += 1 + u[1];
+        var ml = dv.getUint16(o); o += 2; var meta = JSON.parse(TD.decode(u.subarray(o, o + ml))); o += ml;
+        var conn = relayed.get(meta.to + ':' + meta.c); if (!conn || conn.closed) return;
+        var R = conn._relay; R.last = Date.now(); relayStats.bytesIn += u.length;
+        if (R.unstable) { R.unstable = false; conn._fire('linkstate', { state: 'connected' }); }
+        while (o < u.length) {
+          var hl = dv.getUint16(o); o += 2; var h = JSON.parse(TD.decode(u.subarray(o, o + hl))); o += hl;
+          var dl = dv.getUint32(o); o += 4; var data = u.slice(o, o + dl); o += dl;
+          rxFrame(conn, h, data);
+        }
+      } catch (e) {}
+    }
+    function txVideo(conn, name, track, screen) {
+      if (!HAS_WC) return null;
+      var P = { track: track, stopped: false };
+      var maxW = screen ? 1280 : 640, maxH = screen ? 720 : 360, fps = screen ? 5 : 15, br = screen ? 600000 : 450000;
+      var enc = null, cfgKey = '', lastTs = -1e15, seq = 0, forceKey = true, lastKeyAt = -1e15, canvas = null, c2d = null, curW = 0, curH = 0;
+      function configure(w, h) {
+        try { if (enc && enc.state !== 'closed') enc.close(); } catch (e) {}
+        curW = w; curH = h;
+        enc = new VideoEncoder({
+          output: function (chunk) { var b = new Uint8Array(chunk.byteLength); chunk.copyTo(b); relayStats.txV++; queueFrame(conn, { n: name, k: 'v', key: chunk.type === 'key' ? 1 : 0, ts: chunk.timestamp, s: seq++, w: w, h: h }, b); },
+          error: function () { cfgKey = ''; },
+        });
+        enc.configure({ codec: 'vp8', width: w, height: h, bitrate: br, framerate: fps, latencyMode: 'realtime' });
+        cfgKey = w + 'x' + h; forceKey = true;
+      }
+      function onFrame(frame) {
+        var src = frame;
+        try {
+          if (P.stopped || conn.closed || !track.enabled) return;
+          var ts = frame.timestamp;
+          if (ts - lastTs < 1e6 / fps - 4000 && ts >= lastTs) return;
+          if (relayBusy(conn)) { forceKey = true; relayStats.dropped++; return; }
+          var sw = frame.displayWidth, sh = frame.displayHeight, sc = Math.min(1, maxW / sw, maxH / sh);
+          var w = Math.max(16, Math.round(sw * sc / 2) * 2), h = Math.max(16, Math.round(sh * sc / 2) * 2);
+          if (cfgKey !== w + 'x' + h || !enc || enc.state === 'closed') configure(w, h);
+          if (enc.encodeQueueSize > 2) { forceKey = true; return; }
+          lastTs = ts;
+          if (frame.codedWidth !== w || frame.codedHeight !== h || frame.displayWidth !== w || frame.displayHeight !== h) {
+            if (!canvas) { canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : document.createElement('canvas'); c2d = canvas.getContext('2d'); }
+            if (canvas.width !== w) canvas.width = w;
+            if (canvas.height !== h) canvas.height = h;
+            c2d.drawImage(frame, 0, 0, w, h);
+            src = new VideoFrame(canvas, { timestamp: ts });
+          }
+          var key = forceKey || ts - lastKeyAt > 3e6 || ts < lastKeyAt;
+          if (key) { lastKeyAt = ts; forceKey = false; }
+          enc.encode(src, { keyFrame: key });
+        } catch (e) { cfgKey = ''; }
+        finally { if (src !== frame) { try { src.close(); } catch (e) {} } try { frame.close(); } catch (e) {} }
+      }
+      if (typeof MediaStreamTrackProcessor !== 'undefined') {
+        var reader = null;
+        try { reader = new MediaStreamTrackProcessor({ track: track }).readable.getReader(); } catch (e) { reader = null; }
+        if (reader) {
+          (async function () { while (!P.stopped) { var r; try { r = await reader.read(); } catch (e) { break; } if (r.done) break; onFrame(r.value); } P.stopped = true; })();
+          P.stop = function () { P.stopped = true; try { reader.cancel(); } catch (e) {} try { enc && enc.state !== 'closed' && enc.close(); } catch (e) {} };
+        }
+      }
+      if (!P.stop) {
+        // No track processor (Safari/Firefox): sample a hidden <video> instead.
+        var vid = document.createElement('video'); vid.muted = true; vid.playsInline = true; vid.autoplay = true;
+        vid.srcObject = new MediaStream([track]); try { vid.play().catch(function () {}); } catch (e) {}
+        var iv = setInterval(function () {
+          if (P.stopped || track.readyState === 'ended') { P.stop(); return; }
+          if (vid.readyState >= 2 && vid.videoWidth) { try { onFrame(new VideoFrame(vid, { timestamp: Math.round(performance.now() * 1000) })); } catch (e) {} }
+        }, Math.round(1000 / fps));
+        P.stop = function () { P.stopped = true; clearInterval(iv); try { vid.srcObject = null; } catch (e) {} try { enc && enc.state !== 'closed' && enc.close(); } catch (e) {} };
+      }
+      P.key = function () { forceKey = true; };
+      return P;
+    }
+    var CAPTURE_WORKLET = "registerProcessor('ehub-relay-cap',class extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(960);this.n=0}process(i){var c=i[0]&&i[0][0];if(c){for(var k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n===960){this.port.postMessage(this.b.slice(0));this.n=0}}}return true}})";
+    var PLAY_WORKLET = "registerProcessor('ehub-relay-play',class extends AudioWorkletProcessor{constructor(){super();this.q=[];this.o=0;this.len=0;this.port.onmessage=e=>{this.q.push(e.data);this.len+=e.data.length;while(this.len>48000*0.4){this.len-=this.q.shift().length;this.o=0}}}process(i,outs){var out=outs[0][0];for(var k=0;k<out.length;k++){var h=this.q[0];if(!h){out[k]=0;continue}out[k]=h[this.o++];if(this.o>=h.length){this.q.shift();this.len-=h.length;this.o=0}}return true}})";
+    var audioCtx = null;
+    function relayAudioCtx() { if (!audioCtx || audioCtx.state === 'closed') { audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 }); } try { audioCtx.resume(); } catch (e) {} return audioCtx; }
+    function txAudio(conn, name, track) {
+      if (!HAS_AC) return null;
+      var P = { track: track, stopped: false }, enc = null, cfg = '', seq = 0;
+      function ensure(sr, ch) {
+        if (enc && enc.state === 'configured' && cfg === sr + '/' + ch) return;
+        try { if (enc && enc.state !== 'closed') enc.close(); } catch (e) {}
+        cfg = sr + '/' + ch;
+        enc = new AudioEncoder({
+          output: function (chunk) { var b = new Uint8Array(chunk.byteLength); chunk.copyTo(b); relayStats.txA++; queueFrame(conn, { n: name, k: 'a', ts: chunk.timestamp, s: seq++, sr: sr, ch: ch }, b); },
+          error: function () { cfg = ''; },
+        });
+        enc.configure({ codec: 'opus', sampleRate: sr, numberOfChannels: ch, bitrate: 32000 });
+      }
+      function onData(ad) {
+        try {
+          if (P.stopped || conn.closed || !track.enabled) return;
+          var ch = Math.min(2, ad.numberOfChannels || 1);
+          ensure(ad.sampleRate, ch);
+          if (enc.encodeQueueSize > 20) return;
+          enc.encode(ad);
+        } catch (e) { cfg = ''; } finally { try { ad.close(); } catch (e) {} }
+      }
+      if (typeof MediaStreamTrackProcessor !== 'undefined') {
+        var reader = null;
+        try { reader = new MediaStreamTrackProcessor({ track: track }).readable.getReader(); } catch (e) { reader = null; }
+        if (reader) {
+          (async function () { while (!P.stopped) { var r; try { r = await reader.read(); } catch (e) { break; } if (r.done) break; onData(r.value); } P.stopped = true; })();
+          P.stop = function () { P.stopped = true; try { reader.cancel(); } catch (e) {} try { enc && enc.state !== 'closed' && enc.close(); } catch (e) {} };
+          return P;
+        }
+      }
+      // No track processor: capture PCM with an AudioWorklet.
+      var node = null, srcN = null, ts = 0;
+      P.stop = function () { P.stopped = true; try { srcN && srcN.disconnect(); node && node.disconnect(); } catch (e) {} try { enc && enc.state !== 'closed' && enc.close(); } catch (e) {} };
+      (async function () {
+        try {
+          var ac = relayAudioCtx();
+          if (!ac.__ehubCap) ac.__ehubCap = ac.audioWorklet.addModule(URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'text/javascript' })));
+          await ac.__ehubCap; if (P.stopped) return;
+          srcN = ac.createMediaStreamSource(new MediaStream([track])); node = new AudioWorkletNode(ac, 'ehub-relay-cap');
+          var mute = ac.createGain(); mute.gain.value = 0; srcN.connect(node); node.connect(mute); mute.connect(ac.destination);
+          node.port.onmessage = function (e) { var f = e.data; try { var ad = new AudioData({ format: 'f32-planar', sampleRate: ac.sampleRate, numberOfFrames: f.length, numberOfChannels: 1, timestamp: ts, data: f }); ts += Math.round(f.length / ac.sampleRate * 1e6); onData(ad); } catch (x) {} };
+        } catch (e) {}
+      })();
+      return P;
+    }
+    function remoteSlot(conn, name) {
+      var R = conn._relay, rm = R.remote.get(name);
+      if (!rm) { rm = { name: name, stream: new MediaStream(), v: null, a: null }; R.remote.set(name, rm); }
+      return rm;
+    }
+    function endRemote(rm) {
+      [rm.v, rm.a].forEach(function (S) { if (!S) return; S.ended = true; try { S.dec && S.dec.state !== 'closed' && S.dec.close(); } catch (e) {} try { S.stop && S.stop(); } catch (e) {} });
+    }
+    function announce(conn, rm, track) { try { rm.stream.addTrack(track); } catch (e) {} conn._fire('media', { name: rm.name, stream: rm.stream }); }
+    function videoSink(conn, rm) {
+      var S = { needKey: true, askedAt: 0, lastSeq: null, dec: null, dims: '' };
+      if (typeof MediaStreamTrackGenerator !== 'undefined') {
+        var gen = new MediaStreamTrackGenerator({ kind: 'video' }), w = gen.writable.getWriter();
+        S.write = function (f) { if (S.ended) { f.close(); return; } if (w.desiredSize !== null && w.desiredSize <= -2) { f.close(); return; } w.write(f).catch(function () {}); };
+        S.stop = function () { try { gen.stop(); } catch (e) {} try { w.close(); } catch (e) {} };
+        announce(conn, rm, gen);
+      } else {
+        var cv = document.createElement('canvas'); cv.width = 640; cv.height = 360; var cx = cv.getContext('2d'), cs = cv.captureStream(15), tr = cs.getVideoTracks()[0];
+        S.write = function (f) { try { if (cv.width !== f.displayWidth) cv.width = f.displayWidth; if (cv.height !== f.displayHeight) cv.height = f.displayHeight; cx.drawImage(f, 0, 0); } catch (e) {} f.close(); };
+        S.stop = function () { try { tr.stop(); } catch (e) {} };
+        announce(conn, rm, tr);
+      }
+      return S;
+    }
+    function audioSink(conn, rm) {
+      var S = { dec: null, cfg: '' };
+      if (typeof MediaStreamTrackGenerator !== 'undefined') {
+        var gen = new MediaStreamTrackGenerator({ kind: 'audio' }), w = gen.writable.getWriter();
+        S.write = function (ad) { if (S.ended) { ad.close(); return; } if (w.desiredSize !== null && w.desiredSize <= -10) { ad.close(); return; } w.write(ad).catch(function () {}); };
+        S.stop = function () { try { gen.stop(); } catch (e) {} try { w.close(); } catch (e) {} };
+        announce(conn, rm, gen);
+      } else {
+        var ac = relayAudioCtx(), dest = ac.createMediaStreamDestination(), node = null, pending = [];
+        S.write = function (ad) { try { var f = new Float32Array(ad.numberOfFrames); ad.copyTo(f, { planeIndex: 0, format: 'f32-planar' }); if (node) node.port.postMessage(f, [f.buffer]); else if (pending.length < 50) pending.push(f); } catch (e) {} ad.close(); };
+        S.stop = function () { try { node && node.disconnect(); } catch (e) {} try { dest.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} };
+        if (!ac.__ehubPlay) ac.__ehubPlay = ac.audioWorklet.addModule(URL.createObjectURL(new Blob([PLAY_WORKLET], { type: 'text/javascript' })));
+        ac.__ehubPlay.then(function () { if (S.ended) return; node = new AudioWorkletNode(ac, 'ehub-relay-play'); node.connect(dest); pending.splice(0).forEach(function (f) { node.port.postMessage(f, [f.buffer]); }); }).catch(function () {});
+        announce(conn, rm, dest.stream.getAudioTracks()[0]);
+      }
+      return S;
+    }
+    function rxFrame(conn, h, data) {
+      var rm = remoteSlot(conn, String(h.n)), now = Date.now();
+      if (h.k === 'v') {
+        if (typeof VideoDecoder === 'undefined') return;
+        var V = rm.v || (rm.v = videoSink(conn, rm));
+        relayStats.rxV++;
+        var askKey = function () { V.needKey = true; if (now - V.askedAt > 800) { V.askedAt = now; relaySend(conn, { t: 'rctl', op: 'key', name: rm.name }); } };
+        if (!h.key && (V.needKey || (V.lastSeq != null && h.s !== V.lastSeq + 1))) { V.lastSeq = h.s; askKey(); return; }
+        V.lastSeq = h.s;
+        if (h.key) {
+          if (!V.dec || V.dec.state === 'closed') {
+            V.dims = '';
+            V.dec = new VideoDecoder({ output: function (f) { relayStats.outV++; V.write(f); }, error: function () { V.needKey = true; } });
+          }
+          if (V.dims !== h.w + 'x' + h.h || V.dec.state !== 'configured') { V.dec.configure({ codec: 'vp8', codedWidth: h.w, codedHeight: h.h, optimizeForLatency: true }); V.dims = h.w + 'x' + h.h; }
+          V.needKey = false;
+        }
+        if (!V.dec || V.dec.state !== 'configured') { askKey(); return; }
+        if (V.dec.decodeQueueSize > 6) { askKey(); return; }
+        try { V.dec.decode(new EncodedVideoChunk({ type: h.key ? 'key' : 'delta', timestamp: h.ts, data: data })); } catch (e) { askKey(); }
+        return;
+      }
+      if (h.k === 'a') {
+        if (typeof AudioDecoder === 'undefined') return;
+        var A = rm.a || (rm.a = audioSink(conn, rm));
+        relayStats.rxA++;
+        var ch = h.ch || 1;
+        if (!A.dec || A.dec.state === 'closed' || A.cfg !== String(ch)) {
+          try { if (A.dec && A.dec.state !== 'closed') A.dec.close(); } catch (e) {}
+          A.dec = new AudioDecoder({ output: function (ad) { relayStats.outA++; A.write(ad); }, error: function () { A.cfg = ''; } });
+          A.dec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: ch }); A.cfg = String(ch);
+        }
+        if (A.dec.decodeQueueSize > 30) return;
+        try { A.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: h.ts, data: data })); } catch (e) { A.cfg = ''; }
+      }
     }
     return {
       async serve(opts) {
@@ -1192,11 +1580,11 @@
         var conn = new Conn(pc, { owner: null, room: /^[a-z]/.test(String(code)) ? code : undefined });
         conn.attach(pc.createDataChannel('everything'));
         var rec = { pc: pc, conn: conn, queued: [], answered: false, timer: null }; dials.set(connId, rec); connCode.set(connId, String(code));
-        conn.addEventListener('close', function () { clearTimeout(rec.timer); dials.delete(connId); });
+        conn.addEventListener('close', function () { clearTimeout(rec.timer); clearTimeout(rec.relayT); clearTimeout(rec.relayWait); dials.delete(connId); });
         pc.onicecandidate = function (e) { postBus({ t: 'ice', connId: connId, to: 'server', candidate: e.candidate ? e.candidate.toJSON() : null }); };
         await pc.setLocalDescription(await pc.createOffer());
         rec.timer = setTimeout(function () { if (rec.answered || conn.closed) return; var e = err('invalid_invite', 'No one is hosting that code right now. Check the code and that the host still has the app open.'); conn._fire('error', { error: e }); conn.close('invalid_invite'); }, NO_HOST_MS);
-        postBus({ t: 'dial', code: String(code), connId: connId, from: { uuid: (opts && typeof opts.anonToken === 'string' && opts.anonToken) || me.uuid, username: me.username }, offer: pc.localDescription.toJSON() });
+        postBus({ t: 'dial', code: String(code), connId: connId, sid: (sig(String(code)) || {}).sid, from: { uuid: (opts && typeof opts.anonToken === 'string' && opts.anonToken) || me.uuid, username: me.username }, offer: pc.localDescription.toJSON() });
         return conn;
       },
       async ensureTurnRelays() {}, async createGuestGrant() { return { grant: 'local-grant', expiresAt: nowSec() + 3600 }; },
