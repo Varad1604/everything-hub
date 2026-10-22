@@ -6,6 +6,9 @@
 //   /api/email/send                  outbound mail through Resend when RESEND_API_KEY is set
 //   /api/peer/<code>                 WebSocket signalling room for ehub.peer (Durable Object PeerRoom); also the
 //                                    server relay (data + WebCodecs media) when no direct WebRTC path exists
+//   /api/diag[/<code>]               POST: a client's connection-diagnostics snapshot for a meeting code (no secrets; rate-limited,
+//                                    last 200 kept, wiped 72 h after the last write). GET /api/diag/<code>?k=<key>: read them
+//                                    back; <key> is a random key a client posted with (shown in its Connection info).
 //   /api/turn                        ICE servers for ehub.peer: Cloudflare Realtime TURN when CF_TURN_KEY_ID + CF_TURN_KEY_API_TOKEN are set, else STUN
 //   /api/w/<app>/<instance>/<path>   an app's team server (Durable Object AppServer runs the app's own script)
 //   /api/site/<name>[/f/<path>]      publish a drive folder (ehub.hosting); served publicly at /s/<name>/<path>
@@ -121,7 +124,21 @@ async function api(request, env, url) {
     const r = await sendEmail(env, await readJSON(request, 30 * 1024 * 1024), who);
     return json(r, r.delivered && r.delivered.length ? 200 : 502);
   }
-  let m = /^\/api\/peer\/([^/]{1,80})$/.exec(p);
+  let m = /^\/api\/diag(?:\/([A-Za-z0-9_.-]{1,80}))?$/.exec(p);
+  if (m) {
+    let code = m[1] || url.searchParams.get('code') || '';
+    if (!code && request.method === 'POST') {
+      const peek = await request.clone().text().catch(() => '');
+      try { code = String(JSON.parse(peek).code || ''); } catch {}
+    }
+    code = String(code).toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 80);
+    if (!code) return json({ message: 'Meeting code missing.' }, 400);
+    const stub = env.PEER_ROOM.get(env.PEER_ROOM.idFromName('diag:' + code));
+    const init = { method: request.method, headers: { 'content-type': 'application/json' } };
+    if (request.method === 'POST') init.body = await request.text();
+    return stub.fetch('https://diag.internal/diag/' + code + url.search, init);
+  }
+  m = /^\/api\/peer\/([^/]{1,80})$/.exec(p);
   if (m) {
     if (request.headers.get('upgrade') !== 'websocket') return json({ message: 'WebSocket expected' }, 426);
     const id = env.PEER_ROOM.idFromName(decodeURIComponent(m[1]));
@@ -275,6 +292,7 @@ async function turnServers(request, env, ip) {
 
 /* ------------------------------------------------------------ peer signalling */
 // Relay budgets: one relayed camera+mic stream is ~60-80 KB/s; a host relaying to several guests sends one per guest.
+const DIAG_MAX_POST = 24 * 1024, DIAG_MAX_ENTRY = 16 * 1024, DIAG_KEEP = 200;
 const PEER_MSGS_PER_SEC = 200, PEER_BYTES_PER_SEC = 640 * 1024, PEER_ROOM_BYTES_PER_SEC = 2.5 * 1024 * 1024;
 export class PeerRoom extends DurableObject {
   constructor(ctx, env) {
@@ -283,6 +301,7 @@ export class PeerRoom extends DurableObject {
     try { this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"t":"ping"}', '{"t":"pong"}')); } catch {}
   }
   async fetch(request) {
+    if (new URL(request.url).pathname.startsWith('/diag/')) return this.diag(request);
     if (this.ctx.getWebSockets().length >= 48) return new Response('Room is full', { status: 429 });
     // ?sid=<random id the engine keeps for this page>: lets relayed traffic be addressed to one socket.
     let sid = '';
@@ -322,6 +341,50 @@ export class PeerRoom extends DurableObject {
     for (const other of this.ctx.getWebSockets('s:' + sid)) if (other !== ws) { try { other.send(msg); } catch {} }
   }
   async webSocketClose(ws, code) { try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch {} }
+  // Connection diagnostics for one meeting code (this object is named 'diag:<code>' and holds no sockets).
+  async diag(request) {
+    const url = new URL(request.url), st = this.ctx.storage, now = Date.now();
+    const pad = (n) => String(n).padStart(10, '0');
+    const nocache = { 'cache-control': 'no-store' };
+    if (request.method === 'POST') {
+      if (!this.dr || now - this.dr.t >= 1000) this.dr = { t: now, n: 0 };
+      if (++this.dr.n > 12) return json({ ok: false, message: 'Slow down.' }, 429, nocache);
+      const text = await request.text();
+      if (text.length > DIAG_MAX_POST) return json({ ok: false, message: 'Too large.' }, 413, nocache);
+      let b; try { b = JSON.parse(text); } catch { return json({ ok: false, message: 'Bad JSON.' }, 400, nocache); }
+      const k = String((b && b.k) || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 40);
+      if (k.length < 12) return json({ ok: false, message: 'Key missing.' }, 400, nocache);
+      const id = String(b.id || '').replace(/[^A-Za-z0-9:_.-]/g, '').slice(0, 48);
+      if (!this.dc) this.dc = new Map();
+      const last = this.dc.get(id + '|' + k) || 0;
+      if (now - last < 1500) return json({ ok: false, message: 'Slow down.' }, 429, nocache);
+      this.dc.set(id + '|' + k, now);
+      if (this.dc.size > 200) this.dc.clear();
+      const meta = (await st.get('meta')) || { seq: 0, first: 1, keys: [] };
+      if (!meta.keys.includes(k)) { meta.keys.push(k); if (meta.keys.length > 32) meta.keys.shift(); }
+      let entry = { t: now, id, d: b.d === undefined ? null : b.d };
+      if (JSON.stringify(entry).length > DIAG_MAX_ENTRY) entry = { t: now, id, truncated: true, d: JSON.stringify(b.d).slice(0, DIAG_MAX_ENTRY - 200) };
+      meta.seq++;
+      await st.put('e:' + pad(meta.seq), entry);
+      const drop = [];
+      while (meta.seq - meta.first + 1 > DIAG_KEEP) drop.push('e:' + pad(meta.first++));
+      if (drop.length) await st.delete(drop);
+      await st.put('meta', meta);
+      await st.setAlarm(now + 72 * 3600 * 1000);
+      return json({ ok: true, seq: meta.seq }, 200, nocache);
+    }
+    if (request.method !== 'GET') return json({ message: 'Not found' }, 404);
+    const meta = await st.get('meta');
+    const k = (url.searchParams.get('k') || '').replace(/[^A-Za-z0-9]/g, '');
+    if (!meta) return json({ ok: false, message: 'No diagnostics for this meeting code.' }, 404, nocache);
+    if (!k || !meta.keys.includes(k)) return json({ ok: false, entries: meta.seq - meta.first + 1, message: 'A diagnostics key from Connection info is needed (?k=).' }, 403, nocache);
+    const since = Math.max(Number(url.searchParams.get('since')) || 0, meta.first - 1);
+    const limit = Math.min(DIAG_KEEP, Math.max(1, Number(url.searchParams.get('limit')) || DIAG_KEEP));
+    const rows = await st.list({ start: 'e:' + pad(since + 1), prefix: 'e:', limit });
+    const entries = []; for (const [key, v] of rows) entries.push(Object.assign({ seq: Number(key.slice(2)) }, v));
+    return json({ ok: true, code: url.pathname.split('/')[2], seq: meta.seq, first: meta.first, entries }, 200, nocache);
+  }
+  async alarm() { try { await this.ctx.storage.deleteAll(); } catch {} }
   async webSocketError(ws) { try { ws.close(1011, 'error'); } catch {} }
 }
 

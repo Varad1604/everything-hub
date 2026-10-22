@@ -4,7 +4,7 @@
  *       content-hashed build assets are cache-first (they never change); everything else is stale-while-revalidate.
  * The app cache survives updates so apps opened before keep working offline; only the shell cache is versioned.
  * Retired hosts (*.invalid) are never contacted; the old SDK address is answered with everything-core.js. */
-const VERSION = 'everything-v4-d6c7f9b3c7';
+const VERSION = 'everything-v4-2c039ff7f2';
 const SHELL = `${VERSION}-shell`;
 const APPS = 'everything-apps-v4';
 const FONTS = 'everything-fonts-v4';
